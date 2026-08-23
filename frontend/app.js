@@ -162,7 +162,7 @@ const isAndroid = typeof window.AndroidBridge !== "undefined";
  */
 function getApiBase() {
   if (window.location.protocol === "file:") {
-    return window.BACKEND_URL || "http://10.0.2.2:8080";
+    return window.BACKEND_URL || "https://shahinxsha.pythonanywhere.com";
   }
   return "";
 }

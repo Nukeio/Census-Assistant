@@ -68,26 +68,29 @@ cd "D:\Agent Works\Projects\CENSUS ASSISTANT ANDROID APP\android"
 
 ## Running the Full Stack
 
-The Android app connects to the Flask backend running on your local machine:
+The Android app talks to a permanently-hosted backend, not your PC — it is
+not tied to any machine's LAN IP. The backend is deployed at:
 
-```powershell
-# Terminal 1: Start Flask backend
-cd "D:\Agent Works\Projects\CENSUS ASSISTANT ANDROID APP"
-.\venv\Scripts\Activate.ps1
-python server.py
-
-# Terminal 2: Build + run Android app on emulator
-cd android
-.\gradlew.bat installDebug
+```
+https://shahinxsha.pythonanywhere.com
 ```
 
-The app probes `http://10.0.2.2:8080/api/admin/stats` on startup:
-- **Backend reachable** → loads the live app from Flask (full functionality)
-- **Offline** → loads bundled `assets/index.html` (UI only, no API calls)
+`MainActivity.kt`'s `BACKEND_URL` constant points there. The app probes
+`$BACKEND_URL/api/admin/stats` on startup:
+- **Backend reachable** → loads the live app (full functionality, works from
+  any network, anywhere)
+- **Offline / unreachable** → loads bundled `assets/index.html` (UI only, no
+  API calls) instead of crashing
 
-> `10.0.2.2` is the Android emulator's alias for the host machine's `localhost`.
-> For a **physical device on the same WiFi**, change `BACKEND_URL` in `MainActivity.kt`
-> to your machine's LAN IP, e.g. `http://192.168.1.105:8080`.
+To update the backend code, push to the `Census-Assistant` GitHub repo, then
+from a PythonAnywhere Bash console run `git pull` inside `~/Census-Assistant`
+and hit **Reload** on the Web tab.
+
+For local development only (testing backend changes before deploying), you
+can still run `python server.py` locally and temporarily point `BACKEND_URL`
+at `http://10.0.2.2:8080` (Android emulator) or your machine's LAN IP for a
+physical device on the same WiFi — just remember to change it back to the
+PythonAnywhere URL before shipping a build.
 
 ---
 

@@ -1710,7 +1710,21 @@ function openPrivacyModal() {
 }
 
 function formatMarkdown(text) {
-  let html = escapeHtml(text);
+  // AI answers embed the raw Google Maps URL inline (e.g. "• **Google Maps:**
+  // https://www.google.com/maps/..."), which used to render as a long,
+  // unclickable wall of text once escaped. Pull those URLs out into
+  // placeholders BEFORE escaping so we can swap in a proper map button
+  // afterwards, instead of ever exposing the long link itself.
+  const mapsUrls = [];
+  let working = String(text || "").replace(
+    /https?:\/\/(?:www\.)?google\.com\/maps\/search\/\?api=1&query=[^\s<>()\[\]]+/g,
+    (match) => {
+      mapsUrls.push(match);
+      return `%%MAPS_LINK_${mapsUrls.length - 1}%%`;
+    }
+  );
+
+  let html = escapeHtml(working);
   // Bold **text**
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
   // Italic *text*
@@ -1721,6 +1735,18 @@ function formatMarkdown(text) {
   html = html.replace(/^• (.*?)$/gm, '<li class="ml-4 list-disc">$1</li>');
   // Newlines
   html = html.replace(/\n/g, '<br/>');
+
+  // Swap the placeholders back in as map buttons rather than raw links.
+  html = html.replace(/%%MAPS_LINK_(\d+)%%/g, (_, idx) => {
+    const url = mapsUrls[Number(idx)];
+    if (!url) return "";
+    return `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer"
+        class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-colors text-xs font-semibold align-middle">
+        <span class="material-symbols-outlined text-[15px]">map</span>
+        <span>Open in Google Maps</span>
+      </a>`;
+  });
+
   return html;
 }
 

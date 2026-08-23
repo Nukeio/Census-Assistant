@@ -750,7 +750,7 @@ async function fetchRecords(append = false) {
       state.recordsCache[rec.user_id] = rec;
       const card = document.createElement("article");
       card.className = "bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/20 p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:bg-surface-container-low transition-all cursor-pointer group";
-      card.onclick = () => openEnumeratorModal(rec.user_id);
+      card.onclick = () => openRecordProfile(rec.user_id);
       
       const cleanMob = (rec.mobile || "8453441975").replace(/[^0-9]/g, "");
       const waMsg = `Inquiry regarding ${rec.name}${rec.hlb_number ? ` (HLB ${rec.hlb_number})` : ""}`;
@@ -820,6 +820,45 @@ async function fetchRecords(append = false) {
 function loadMoreRecords() {
   state.recordsPage += 1;
   fetchRecords(true);
+}
+
+// Search Records lists every functionary type in one feed, but Supervisors
+// carry a richer profile (circles + the full table of enumerators reporting
+// to them) that only the dedicated /api/records/supervisor endpoint returns.
+// The plain records-search payload used for the card itself doesn't include
+// that, so clicking a Supervisor card here used to open the generic
+// Enumerator modal with blank jurisdiction fields. Route Supervisor clicks
+// to the same rich modal used on the Supervision tab instead, fetching the
+// full detail on demand since it isn't preloaded on this page.
+function openRecordProfile(userId) {
+  const rec = (state.recordsCache || {})[userId];
+  if (!rec) return;
+
+  if (/supervisor/i.test(rec.role || "")) {
+    openSupervisorProfileFromSearch(rec);
+  } else {
+    openEnumeratorModal(userId);
+  }
+}
+
+async function openSupervisorProfileFromSearch(rec) {
+  try {
+    const res = await apiFetch(`/api/records/supervisor?q=${encodeURIComponent(rec.user_id)}`);
+    const data = await res.json();
+    const sup = (data.supervisors || []).find(s => s.user_id === rec.user_id) || (data.supervisors || [])[0];
+
+    if (!sup) {
+      // Fallback so a click never does nothing, even if the lookup misses.
+      openEnumeratorModal(rec.user_id);
+      return;
+    }
+
+    state.supervisorsCache = state.supervisorsCache || {};
+    state.supervisorsCache[sup.name] = sup;
+    openSupervisorModal(sup.name);
+  } catch (err) {
+    openEnumeratorModal(rec.user_id);
+  }
 }
 
 function openEnumeratorModal(userId) {

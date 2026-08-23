@@ -762,6 +762,21 @@ async function fetchRecords(append = false) {
            </a>`
         : "";
 
+      // HLB/Supervisor/Circle only apply to individual block-level roles
+      // (Enumerators). Supervisors and other roles never have their own
+      // HLB by design, so showing "—" placeholders for them read like
+      // missing data — just omit that row instead. An Enumerator with no
+      // HLB match, on the other hand, IS a real gap (registered but not
+      // yet assigned a block) — flag it clearly rather than blanking it.
+      const isEnumeratorRole = /enumerator/i.test(rec.role || "");
+      const allocationRowHtml = isEnumeratorRole
+        ? (rec.hlb_number
+            ? `<span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px] text-primary">tag</span> HLB: <strong>${escapeHtml(rec.hlb_number)}</strong></span>
+               <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">supervisor_account</span> Supervisor: ${escapeHtml(rec.supervisor || "—")}</span>
+               <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">pin_drop</span> Circle: ${escapeHtml(rec.circle || "—")}</span>`
+            : `<span class="flex items-center gap-1 text-amber-600 font-semibold"><span class="material-symbols-outlined text-[15px]">error_outline</span> HLB block not yet allocated</span>`)
+        : "";
+
       card.innerHTML = `
         <div class="flex-1 min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
@@ -769,10 +784,8 @@ async function fetchRecords(append = false) {
             <span class="text-[10px] px-2 py-0.5 rounded bg-primary-fixed text-primary font-semibold">${escapeHtml(rec.role)}</span>
           </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-on-surface-variant mt-2">
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px] text-primary">tag</span> HLB: <strong>${escapeHtml(rec.hlb_number || "—")}</strong></span>
             <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">badge</span> ID: <code class="font-mono font-bold">${escapeHtml(rec.user_id)}</code></span>
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">supervisor_account</span> Supervisor: ${escapeHtml(rec.supervisor || "—")}</span>
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">pin_drop</span> Circle: ${escapeHtml(rec.circle || "—")}</span>
+            ${allocationRowHtml}
             ${rec.area_name ? `<span class="flex items-center gap-1 text-primary"><span class="material-symbols-outlined text-[15px]">location_on</span> ${escapeHtml(rec.area_name)}</span>` : ""}
           </div>
         </div>
@@ -830,7 +843,24 @@ function openEnumeratorModal(userId) {
   document.getElementById("enum-modal-call-btn").onclick = () => nativeCall(cleanMob);
   document.getElementById("enum-modal-wa-btn").onclick = () => nativeWhatsApp(`91${cleanMob}`, waMsg);
 
-  document.getElementById("enum-modal-hlb").textContent = rec.hlb_number || "—";
+  // HLB/Circle/Supervisor only apply to individual block-level roles
+  // (Enumerators) — hide that whole section for Supervisors/other roles
+  // instead of showing a confusing row of dashes. An Enumerator with no
+  // HLB match is a real gap (registered but not yet assigned a block),
+  // so flag it clearly rather than blanking it.
+  const isEnumeratorRole = /enumerator/i.test(rec.role || "");
+  const allocationSection = document.getElementById("enum-modal-allocation-section");
+  if (allocationSection) {
+    allocationSection.classList.toggle("hidden", !isEnumeratorRole);
+  }
+  const hlbEl = document.getElementById("enum-modal-hlb");
+  if (rec.hlb_number) {
+    hlbEl.textContent = rec.hlb_number;
+    hlbEl.classList.remove("text-amber-600");
+  } else {
+    hlbEl.textContent = "Unallocated";
+    hlbEl.classList.add("text-amber-600");
+  }
   document.getElementById("enum-modal-circle").textContent = rec.circle || "—";
   document.getElementById("enum-modal-supervisor").textContent = rec.supervisor || "—";
   document.getElementById("enum-modal-village").textContent = rec.village_town || rec.area_name || "—";

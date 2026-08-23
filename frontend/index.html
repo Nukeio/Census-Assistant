@@ -1165,8 +1165,9 @@
           </button>
         </div>
 
-        <!-- Allocation Information -->
-        <div class="bg-surface rounded-xl p-4 border border-outline-variant/30 space-y-2.5">
+        <!-- Allocation Information (hidden for roles that don't carry an
+             individual HLB block, e.g. Supervisors — toggled in JS) -->
+        <div id="enum-modal-allocation-section" class="bg-surface rounded-xl p-4 border border-outline-variant/30 space-y-2.5">
           <h4 class="text-[11px] font-bold text-primary uppercase tracking-wider">Census Allocation Details</h4>
           <div class="grid grid-cols-2 gap-3 text-xs">
             <div>

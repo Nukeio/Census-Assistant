@@ -66,9 +66,12 @@ def _require_admin():
 def _is_admin_request():
     """
     Non-strict admin check for otherwise-public endpoints (record search,
-    supervisor list) that should still hide DISABLED functionaries from
-    regular guest/OTP-authenticated users while letting the admin see
-    everything, including disabled accounts, in the same views.
+    supervisor list) that should still hide non-ACTIVE functionaries
+    (status DISABLED, INACTIVE, LOCK, or any other non-"ACTIVE" value —
+    the source Excel data uses INACTIVE/LOCK, while the admin toggle uses
+    ACTIVE/DISABLED) from regular guest/OTP-authenticated users, while
+    letting the admin see everyone, including inactive/disabled accounts,
+    in the same views.
     """
     user = _authenticated_user()
     return bool(user and user.get("role") == "admin")
@@ -208,7 +211,7 @@ def records_search():
     cursor = conn.cursor()
 
     show_disabled = _is_admin_request()
-    disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR f.status != 'DISABLED')"
+    disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR UPPER(f.status) = 'ACTIVE')"
 
     if filter_by == "hlb":
         # Search HLB allocation directly with a COUNT for proper pagination
@@ -326,7 +329,7 @@ def records_search():
             params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
 
     if not show_disabled:
-        where_clauses.append("(f.status IS NULL OR f.status != 'DISABLED')")
+        where_clauses.append("(f.status IS NULL OR UPPER(f.status) = 'ACTIVE')")
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -421,7 +424,7 @@ def supervisor_list():
         where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
         params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
     if not show_disabled:
-        where_sql += " AND (status IS NULL OR status != 'DISABLED')"
+        where_sql += " AND (status IS NULL OR UPPER(status) = 'ACTIVE')"
 
     cursor.execute(f"""
         SELECT * FROM functionaries {where_sql} ORDER BY name ASC LIMIT ?
@@ -437,7 +440,7 @@ def supervisor_list():
         circles = [c["supervisory_circle_no"] for c in cursor.fetchall() if c["supervisory_circle_no"]]
 
         # Pull all enumerators reporting under this supervisor across all 3 sheets
-        enum_disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR f.status != 'DISABLED')"
+        enum_disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR UPPER(f.status) = 'ACTIVE')"
         cursor.execute(f"""
             SELECT h.hlb_no, h.supervisory_circle_no, h.enumerator_name, h.enumerator_user_id, h.allotment_date,
                    f.mobile_number, f.district, f.sub_district, f.village_town,

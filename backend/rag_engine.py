@@ -147,6 +147,18 @@ def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
         """, (fts_query, limit))
         return cursor.fetchall()
 
+    def _term_clause(w):
+        # The Porter stemmer unifies plenty of pairs on its own (duty/duties,
+        # define/defined), but not derivational ones like definition/defined
+        # — those diverge too early for the stemmer to merge. For longer
+        # words, OR in a short 5-char prefix alongside the full-word prefix;
+        # empirically this catches most of those cases (definition↔defined,
+        # criteria↔criterion, allocation↔allocated, supervisor↔supervisory)
+        # without being so short it starts matching unrelated words.
+        if len(w) > 8:
+            return f'("{w}"* OR "{w[:5]}"*)'
+        return f'"{w}"*'
+
     rows = []
     # Try an AND match first — every keyword must appear (as a stemmed
     # prefix) in the same chunk. This is far more precise than OR: for a
@@ -156,7 +168,7 @@ def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
     # actually defines it. Requiring all terms narrows that down sharply.
     # Only fall back to OR (then plain LIKE) if AND finds nothing at all.
     if len(clean_words) > 1:
-        and_query = " AND ".join([f'"{w}"*' for w in clean_words])
+        and_query = " AND ".join([_term_clause(w) for w in clean_words])
         try:
             rows = _run_fts(and_query)
         except Exception as e:

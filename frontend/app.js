@@ -809,6 +809,55 @@ function loadMoreRecords() {
   fetchRecords(true);
 }
 
+function openEnumeratorModal(userId) {
+  const rec = (state.recordsCache || {})[userId];
+  if (!rec) return;
+
+  const modal = document.getElementById("modal-enumerator-profile");
+  if (!modal) return;
+
+  const initials = rec.name
+    ? rec.name.split(" ").filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase()
+    : "EN";
+  document.getElementById("enum-modal-avatar").textContent = initials;
+  document.getElementById("enum-modal-name").textContent = rec.name || "Unknown";
+  document.getElementById("enum-modal-role").textContent = rec.role || "Enumerator";
+  document.getElementById("enum-modal-id").textContent = rec.user_id || "N/A";
+
+  const cleanMob = (rec.mobile || "8453441975").replace(/[^0-9]/g, "");
+  const waMsg = `Inquiry regarding ${rec.name}${rec.hlb_number ? ` (HLB ${rec.hlb_number})` : ""}`;
+  document.getElementById("enum-modal-phone").textContent = rec.mobile ? `+91 ${cleanMob}` : "Call";
+  document.getElementById("enum-modal-call-btn").onclick = () => nativeCall(cleanMob);
+  document.getElementById("enum-modal-wa-btn").onclick = () => nativeWhatsApp(`91${cleanMob}`, waMsg);
+
+  document.getElementById("enum-modal-hlb").textContent = rec.hlb_number || "—";
+  document.getElementById("enum-modal-circle").textContent = rec.circle || "—";
+  document.getElementById("enum-modal-supervisor").textContent = rec.supervisor || "—";
+  document.getElementById("enum-modal-village").textContent = rec.village_town || rec.area_name || "—";
+  document.getElementById("enum-modal-landmark").textContent = rec.landmark || "—";
+  document.getElementById("enum-modal-boundary").textContent = rec.boundary_description || "No boundary description on record.";
+
+  const mapsLink = document.getElementById("enum-modal-maps-link");
+  if (rec.maps_url) {
+    mapsLink.href = rec.maps_url;
+    mapsLink.classList.remove("hidden");
+  } else {
+    mapsLink.classList.add("hidden");
+  }
+
+  document.getElementById("enum-modal-ask-ai-btn").onclick = () => {
+    closeEnumeratorModal();
+    quickAsk(`Show details for ${rec.name}`);
+  };
+
+  modal.classList.remove("hidden");
+}
+
+function closeEnumeratorModal() {
+  const modal = document.getElementById("modal-enumerator-profile");
+  if (modal) modal.classList.add("hidden");
+}
+
 // ==================== 7. MANUALS & GUIDELINES HANDLERS ====================
 async function executeManualSearch() {
   const query = document.getElementById("manual-search-input").value.trim();

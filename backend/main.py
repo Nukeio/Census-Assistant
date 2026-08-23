@@ -70,6 +70,18 @@ def serve_static(filename):
         return send_from_directory(FRONTEND_DIR, filename)
     return send_from_directory(FRONTEND_DIR, "index.html")
 
+# ----------------- Health Check -----------------
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """
+    Lightweight, unauthenticated liveness probe. The Android app calls this
+    on every launch to decide whether to load the live backend or fall back
+    to its bundled offline copy — it must NEVER require admin auth (or any
+    auth at all), otherwise every guest/functionary launch would look like
+    the backend is down and get stuck on stale offline content.
+    """
+    return jsonify({"status": "ok"})
+
 # ----------------- Auth Endpoints -----------------
 @app.route("/api/auth/guest", methods=["POST"])
 def auth_guest():

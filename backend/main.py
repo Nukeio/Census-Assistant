@@ -187,6 +187,19 @@ def records_search():
     filter_by = request.args.get("filter", "all") # 'all', 'name', 'mobile', 'id', 'hlb', 'circle'
     if filter_by == "eb":
         filter_by = "hlb"
+
+    # When "All" is selected, infer intent from the query shape instead of an
+    # unfocused multi-field LIKE: HLB blocks are 3-4 digit numbers (e.g.
+    # "0153"), so a short numeric query is almost certainly an HLB lookup,
+    # while a longer numeric string (5+ digits) is a mobile number search.
+    # 1-2 digit numbers are too ambiguous to guess and fall through to the
+    # normal broad search.
+    if filter_by == "all" and q.isdigit():
+        if 3 <= len(q) <= 4:
+            filter_by = "hlb"
+        elif len(q) >= 5:
+            filter_by = "mobile"
+
     page = int(request.args.get("page", 1))
     limit = int(request.args.get("limit", 15))
     offset = (page - 1) * limit
@@ -320,15 +333,36 @@ def records_search():
     cursor.execute(f"SELECT COUNT(*) FROM functionaries f {where_sql}", params)
     total = cursor.fetchone()[0]
 
+    # Rank by name relevance instead of insertion order: an exact name match
+    # (case-insensitive) comes first, then names starting with the query,
+    # then any other substring match, then alphabetical for the rest — so
+    # searching "Abdul Baten" under "All" surfaces that person before an
+    # unrelated record that merely happens to share a village/mobile digit.
+    if q:
+        order_sql = """
+            ORDER BY
+                CASE
+                    WHEN LOWER(f.name) = LOWER(?) THEN 0
+                    WHEN f.name LIKE ? THEN 1
+                    WHEN f.name LIKE ? THEN 2
+                    ELSE 3
+                END,
+                f.name ASC
+        """
+        order_params = [q, f"{q}%", f"%{q}%"]
+    else:
+        order_sql = "ORDER BY f.id ASC"
+        order_params = []
+
     cursor.execute(f"""
         SELECT f.*, h.hlb_no, h.supervisor_name, h.supervisory_circle_no, d.village_ward_name, d.landmark, d.boundary_description
         FROM functionaries f
         LEFT JOIN hlb_allocations h ON f.user_id = h.enumerator_user_id
         LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
         {where_sql}
-        ORDER BY f.id ASC
+        {order_sql}
         LIMIT ? OFFSET ?
-    """, params + [limit, offset])
+    """, params + order_params + [limit, offset])
     rows = [dict(r) for r in cursor.fetchall()]
 
     results = []

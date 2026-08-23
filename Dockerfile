@@ -6,7 +6,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=8080
+    PORT=8080 \
+    DATA_DIR=/app/data
 
 WORKDIR /app
 
@@ -28,9 +29,14 @@ COPY database/ ./database/
 COPY *.xlsx ./
 COPY *.pdf ./
 
-# Run initial ingestion and verify SQLite database creation
-RUN python -m backend.ingestion
+# Build-time sanity check: verify the seed Excel/PDF files parse and the
+# schema initializes cleanly. This writes into the image layer only — the
+# entrypoint script below re-seeds the real persistent volume at runtime.
+RUN mkdir -p /app/data && python -m backend.ingestion
+
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8080
 
-CMD ["python", "-m", "backend.main"]
+ENTRYPOINT ["./entrypoint.sh"]

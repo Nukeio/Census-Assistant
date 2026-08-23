@@ -10,7 +10,13 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "census_assistant.db")
+ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+# DATA_DIR points at a persistent volume in production (e.g. a mounted cloud
+# disk) so the database survives redeploys/restarts. Defaults to ROOT_DIR for
+# local/dev runs where no separate data volume is configured.
+DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "census_assistant.db")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CensusDB")
 

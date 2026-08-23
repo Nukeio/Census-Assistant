@@ -24,6 +24,10 @@ from .messaging_gateway import (
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
+# Admin-uploaded files must land in the persistent data volume, not the
+# (ephemeral, image-baked) app root, or they vanish on every redeploy.
+DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 logger = logging.getLogger("CensusServer")
 logging.basicConfig(level=logging.INFO)
@@ -349,7 +353,7 @@ def upload_excel():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
-    target_path = os.path.join(ROOT_DIR, filename)
+    target_path = os.path.join(DATA_DIR, filename)
     file.save(target_path)
 
     # Ingest based on filename
@@ -372,7 +376,7 @@ def upload_pdf():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
-    target_path = os.path.join(ROOT_DIR, filename)
+    target_path = os.path.join(DATA_DIR, filename)
     file.save(target_path)
 
     cnt = ingest_pdf_manuals()

@@ -15,11 +15,21 @@ logger = logging.getLogger("IngestionEngine")
 logging.basicConfig(level=logging.INFO)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+# Admin-uploaded replacement files live in DATA_DIR (the persistent volume in
+# production); the original seed copies baked into the image/repo live in
+# ROOT_DIR. Always prefer a newer DATA_DIR copy if one has been uploaded.
+DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
+
+def _resolve_source(filename: str) -> str:
+    data_path = os.path.join(DATA_DIR, filename)
+    if os.path.exists(data_path):
+        return data_path
+    return os.path.join(ROOT_DIR, filename)
 
 def ingest_all_users(filepath: str = None) -> int:
     """Ingest All_Users.xlsx into functionaries table."""
     if not filepath:
-        filepath = os.path.join(ROOT_DIR, "All_Users.xlsx")
+        filepath = _resolve_source("All_Users.xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -79,7 +89,7 @@ def ingest_all_users(filepath: str = None) -> int:
 def ingest_hlb_allocation(filepath: str = None) -> int:
     """Ingest HLB Allocation (2).xlsx into hlb_allocations table."""
     if not filepath:
-        filepath = os.path.join(ROOT_DIR, "HLB Allocation (2).xlsx")
+        filepath = _resolve_source("HLB Allocation (2).xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -160,7 +170,7 @@ def ingest_pdf_manuals() -> int:
     total_chunks = 0
 
     for pdf_info in pdf_files:
-        filepath = os.path.join(ROOT_DIR, pdf_info["filename"])
+        filepath = _resolve_source(pdf_info["filename"])
         if not os.path.exists(filepath):
             logger.warning(f"PDF file not found: {filepath}")
             continue

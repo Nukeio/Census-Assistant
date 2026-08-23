@@ -145,8 +145,12 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) {
                     swipeRefresh.isRefreshing = false
-                    // Fall back to bundled asset
-                    if (!view.url!!.startsWith("file://")) {
+                    // view.url can be null on the very first navigation of a fresh WebView
+                    // (e.g. when the initial load itself is the one that fails) — a plain
+                    // "!!" here throws an NPE and crashes the whole app on launch. Guard
+                    // with a safe call instead.
+                    val currentUrl = view.url
+                    if (currentUrl == null || !currentUrl.startsWith("file://")) {
                         webView.loadUrl(LOCAL_ASSET_URL)
                     }
                 }

@@ -137,8 +137,7 @@ def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
     if not clean_words:
         clean_words = ["census", "guidelines"]
 
-    fts_query = " OR ".join([f'"{w}"*' for w in clean_words])
-    try:
+    def _run_fts(fts_query):
         cursor.execute("""
             SELECT m.*, rank FROM manual_chunks m
             JOIN manual_chunks_fts fts ON m.id = fts.rowid
@@ -146,17 +145,39 @@ def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
             ORDER BY rank
             LIMIT ?
         """, (fts_query, limit))
-        for row in cursor.fetchall():
-            results.append({
-                "source_file": row["source_file"],
-                "doc_title": row["doc_title"],
-                "page_number": row["page_number"],
-                "section_header": row["section_header"],
-                "chunk_text": row["chunk_text"],
-                "source": f"{row['doc_title']}, Page {row['page_number']}"
-            })
-    except Exception as e:
-        logger.debug(f"Manual FTS query error: {e}")
+        return cursor.fetchall()
+
+    rows = []
+    # Try an AND match first — every keyword must appear (as a stemmed
+    # prefix) in the same chunk. This is far more precise than OR: for a
+    # query like "household definition criteria", an OR match matches almost
+    # every chunk in the document (since "household" appears on nearly every
+    # page), and ranking alone doesn't reliably surface the one chunk that
+    # actually defines it. Requiring all terms narrows that down sharply.
+    # Only fall back to OR (then plain LIKE) if AND finds nothing at all.
+    if len(clean_words) > 1:
+        and_query = " AND ".join([f'"{w}"*' for w in clean_words])
+        try:
+            rows = _run_fts(and_query)
+        except Exception as e:
+            logger.debug(f"Manual FTS AND query error: {e}")
+
+    if not rows:
+        or_query = " OR ".join([f'"{w}"*' for w in clean_words])
+        try:
+            rows = _run_fts(or_query)
+        except Exception as e:
+            logger.debug(f"Manual FTS OR query error: {e}")
+
+    for row in rows:
+        results.append({
+            "source_file": row["source_file"],
+            "doc_title": row["doc_title"],
+            "page_number": row["page_number"],
+            "section_header": row["section_header"],
+            "chunk_text": row["chunk_text"],
+            "source": f"{row['doc_title']}, Page {row['page_number']}"
+        })
 
     # Fallback to LIKE
     if not results and clean_words:

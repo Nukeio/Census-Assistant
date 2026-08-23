@@ -44,6 +44,31 @@ SYSTEM_PROMPTS = {
     )
 }
 
+def _relevant_snippet(text: str, keywords: list, window: int = 600) -> str:
+    """
+    Return a window of `text` centered on the earliest matched keyword,
+    instead of always slicing from the start. A matched manual/FAQ chunk is
+    often ~800 chars covering multiple Q&A items; without this, the shown
+    excerpt was frequently just "whatever came first in the chunk" rather
+    than the part that actually answers the question.
+    """
+    if not text:
+        return text
+    lower = text.lower()
+    best_pos = None
+    for kw in keywords:
+        idx = lower.find(kw.lower())
+        if idx != -1 and (best_pos is None or idx < best_pos):
+            best_pos = idx
+    if best_pos is None:
+        return text[:window] + ("..." if len(text) > window else "")
+    start = max(0, best_pos - 120)
+    end = min(len(text), start + window)
+    snippet = text[start:end]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
+
 def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str = "en") -> str:
     """Intelligent rule-based RAG synthesizer when no external API key is configured."""
     q_lower = query.lower()
@@ -169,8 +194,15 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"For technical assistance, contact **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
                 )
 
-    # 3. Person Name lookup
-    if records and intent == "RECORD_SEARCH":
+    # 3. Person Name lookup. This used to require intent == "RECORD_SEARCH"
+    # exactly, but detect_intent()'s keyword regex is narrow and doesn't
+    # recognize phrasing like "Show details for <name>" (used by the ">"
+    # button on a search result card) — that phrasing classifies as GENERAL,
+    # so a real functionary match here was being ignored and falling through
+    # to the generic manual-guideline answer below every time. Show the
+    # matched person whenever we have one, as long as the query wasn't
+    # actually a guideline/manual question (MANUAL_SEARCH).
+    if records and intent != "MANUAL_SEARCH":
         rec = records[0]
         if rec.get("type") == "functionary":
             return (
@@ -187,11 +219,14 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     # 4. Manual Guidelines / Definitions / Procedures
     if manuals:
         doc = manuals[0]
-        text_snippet = doc["chunk_text"]
-        # Format cleanly
-        if len(text_snippet) > 500:
-            text_snippet = text_snippet[:500] + "..."
-        
+        # Center the excerpt on the actual matched keywords instead of
+        # always showing the start of the chunk — a matched chunk can be
+        # ~800 chars covering several unrelated FAQ items, and the first
+        # 500 of those chars are often not the part that answers the
+        # question that was actually asked.
+        query_keywords = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3]
+        text_snippet = _relevant_snippet(doc["chunk_text"], query_keywords)
+
         return (
             f"**{doc.get('section_header') or 'Census Manual Guideline'}:**\n\n"
             f"{text_snippet}\n\n"

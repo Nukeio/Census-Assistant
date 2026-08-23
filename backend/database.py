@@ -142,12 +142,25 @@ def init_database():
                     content='hlb_allocations', content_rowid='id'
                 )
             """)
+            # manual_chunks_fts uses the Porter stemmer (unlike the two FTS
+            # tables above, which index proper nouns/IDs where stemming
+            # would hurt exact matches). Guideline/FAQ text needs it badly —
+            # without it, a search for "definition" never matches text that
+            # says "defined", "duties" never matches "duty", etc., which was
+            # producing irrelevant top-ranked answers for nearly every
+            # manual/FAQ question. Recreate it with the stemmer + rebuild the
+            # index from the content table every startup — self-healing,
+            # like the admin-account seed above, so a prior deploy without
+            # the stemmer heals itself without manual DB surgery.
+            cursor.execute("DROP TABLE IF EXISTS manual_chunks_fts")
             cursor.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS manual_chunks_fts USING fts5(
+                CREATE VIRTUAL TABLE manual_chunks_fts USING fts5(
                     source_file, doc_title, page_number, section_header, chunk_text,
-                    content='manual_chunks', content_rowid='id'
+                    content='manual_chunks', content_rowid='id',
+                    tokenize = 'porter unicode61'
                 )
             """)
+            cursor.execute("INSERT INTO manual_chunks_fts(manual_chunks_fts) VALUES('rebuild')")
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 setup note: {e}")
 

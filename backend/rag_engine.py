@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Dict, Any, List, Optional
 from .database import get_db_connection
+from .messaging_gateway import TECHNICAL_ASSISTANTS
 
 logger = logging.getLogger("RAGEngine")
 logging.basicConfig(level=logging.INFO)
@@ -22,12 +23,16 @@ def detect_intent(query: str) -> str:
     """Classify user query intent."""
     q = query.lower()
     
-    # EB / HLB or Enumerator / Record lookup
+    # HLB (formerly "EB") or Enumerator / Record lookup. The "eb" alias is
+    # still recognized so old queries/links keep working, but every
+    # response now speaks in HLB terms only.
     if re.search(r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|who is in charge)\b', q):
         return INTENT_RECORD_SEARCH
-    
-    # Supervisor specific query
-    if re.search(r'\b(supervisor|zonal supervisor|s\.?\s*a\.?\s*ahmed|circle supervisor|supervisory circle)\b', q) and not re.search(r'\b(duty|duties|role|guideline|manual|rule)\b', q):
+
+    # Supervisor specific query. Note: "S. A. Ahmed" is NOT a supervisor —
+    # he is one of the two Technical Assistants — so his name is
+    # deliberately excluded from this trigger.
+    if re.search(r'\b(supervisor|zonal supervisor|circle supervisor|supervisory circle)\b', q) and not re.search(r'\b(duty|duties|role|guideline|manual|rule)\b', q):
         return INTENT_SUPERVISOR_QUERY
         
     # Manual, Guidelines, Procedures, Definitions
@@ -42,7 +47,7 @@ def search_structured_records(query: str, limit: int = 5) -> List[Dict[str, Any]
     cursor = conn.cursor()
     results = []
 
-    # 1. Check for EB / HLB number
+    # 1. Check for HLB number (accepts the legacy "eb"/"block" wording too)
     eb_match = re.search(r'\b(?:eb|hlb|block)\s*#?\s*0*(\d+)\b', query, re.IGNORECASE)
     if eb_match:
         eb_num = eb_match.group(1)
@@ -197,7 +202,7 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         for idx, rec in enumerate(record_results, 1):
             if rec.get("type") == "hlb_allocation":
                 context_parts.append(
-                    f"{idx}. HLB/EB Number: {rec['hlb_no']} | Circle: {rec['circle_no']} | "
+                    f"{idx}. HLB Number: {rec['hlb_no']} | Circle: {rec['circle_no']} | "
                     f"Enumerator: {rec['enumerator_name']} (ID: {rec['enumerator_user_id']}) | "
                     f"Supervisor: {rec['supervisor_name']} | Allotment Date: {rec['allotment_date']}"
                 )
@@ -220,12 +225,15 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
             )
             citations.append(doc['source'])
 
-    # Standard technical assistant contact block
-    contact_block = (
-        "Technical Assistant: Shahin Sha A. (+91 84534 41975, WhatsApp: https://wa.me/918453441975)\n"
-        "Supervisor: S. A. Ahmed\n"
-        "Circle: Lakhipur Circle"
+    # Standard technical assistant contact block. Both Technical Assistants
+    # are listed here — neither of them is a supervisor; real supervisor
+    # names come only from the matched HLB allocation / functionary
+    # records above.
+    ta_lines = "\n".join(
+        f"Technical Assistant: {ta['name']} ({ta['phone']}, WhatsApp: {ta['whatsapp_link']})"
+        for ta in TECHNICAL_ASSISTANTS
     )
+    contact_block = f"{ta_lines}\nCircle: Lakhipur Circle"
 
     return {
         "intent": intent,

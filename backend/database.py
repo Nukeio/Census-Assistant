@@ -10,13 +10,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
-# DATA_DIR points at a persistent volume in production (e.g. a mounted cloud
-# disk) so the database survives redeploys/restarts. Defaults to ROOT_DIR for
-# local/dev runs where no separate data volume is configured.
-DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "census_assistant.db")
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "census_assistant.db")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("CensusDB")
 
@@ -157,13 +151,21 @@ def init_database():
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 setup note: {e}")
 
-        # Seed Default Admin (admin / admin123)
+        # Seed/refresh the single authorized admin account. Only Technical
+        # Assistants are meant to reach the admin portal — this runs on every
+        # startup, deletes any other admin username, and refreshes the
+        # password hash so the DB always has exactly this one admin identity,
+        # regardless of what was seeded in the past.
         import hashlib
-        admin_pass_hash = hashlib.sha256("admin123".encode("utf-8")).hexdigest()
+        admin_username = os.environ.get("ADMIN_USERNAME", "shahinxsha")
+        admin_password = os.environ.get("ADMIN_PASSWORD", "TechAss@99")
+        admin_pass_hash = hashlib.sha256(admin_password.encode("utf-8")).hexdigest()
+        cursor.execute("DELETE FROM admin_users WHERE username != ?", (admin_username,))
         cursor.execute("""
-            INSERT OR IGNORE INTO admin_users (username, password_hash, full_name, role)
-            VALUES ('admin', ?, 'Census Admin Officer', 'admin')
-        """, (admin_pass_hash,))
+            INSERT INTO admin_users (username, password_hash, full_name, role)
+            VALUES (?, ?, 'Shahin Sha A. (Technical Assistant)', 'admin')
+            ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
+        """, (admin_username, admin_pass_hash))
 
         # Seed Default System Settings
         default_settings = {
@@ -172,7 +174,9 @@ def init_database():
             "technical_assistant_name": "Shahin Sha A.",
             "technical_assistant_phone": "+91 84534 41975",
             "technical_assistant_wa_link": "https://wa.me/918453441975",
-            "supervisor_name": "S. A. Ahmed",
+            "technical_assistant_2_name": "S. A. Ahmed",
+            "technical_assistant_2_phone": "+91 69019 80926",
+            "technical_assistant_2_wa_link": "https://wa.me/916901980926",
             "circle_name": "Lakhipur Circle",
             "last_sync_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sync_status": "Synced"

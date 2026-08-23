@@ -20,11 +20,11 @@ const I18N = {
     nav_alerts: "Alerts",
     nav_settings: "Settings",
     nav_admin: "Admin",
-    search_placeholder: "Ask anything about Census or search EB...",
+    search_placeholder: "Ask anything about Census or search HLB...",
     chat_wa: "Chat on WhatsApp",
     ask_ai: "Ask AI",
     search_records: "Search Records",
-    search_sub: "Filter and review assigned census functionaries and EB blocks.",
+    search_sub: "Filter and review assigned census functionaries and HLB blocks.",
     manuals: "Manuals",
     manuals_guidelines: "Manuals & Guidelines",
     supervisor_info: "Supervisor Info",
@@ -53,11 +53,11 @@ const I18N = {
     nav_alerts: "বিজ্ঞপ্তি",
     nav_settings: "ছেটিংছ",
     nav_admin: "এডমিন",
-    search_placeholder: "লোকপিয়ল বা EB সম্পৰ্কে যিকোনো প্ৰশ্ন সুধক...",
+    search_placeholder: "লোকপিয়ল বা HLB সম্পৰ্কে যিকোনো প্ৰশ্ন সুধক...",
     chat_wa: "হোৱাটছএপত বাৰ্তালাপ কৰক",
     ask_ai: "এআই ক সোধক",
     search_records: "নথি সন্ধান কৰক",
-    search_sub: "লোকপিয়ল কৰ্মী আৰু আবণ্টিত EB ব্লকৰ তালিকা চাওক।",
+    search_sub: "লোকপিয়ল কৰ্মী আৰু আবণ্টিত HLB ব্লকৰ তালিকা চাওক।",
     manuals: "নিৰ্দেশাৱলী",
     manuals_guidelines: "নিৰ্দেশনা আৰু মেনুৱেল",
     supervisor_info: "পৰ্যবেক্ষকৰ তথ্য",
@@ -86,11 +86,11 @@ const I18N = {
     nav_alerts: "सूचनाएं",
     nav_settings: "सेटिंग्स",
     nav_admin: "व्यवस्थापक",
-    search_placeholder: "जनगणना या EB ब्लॉक के बारे में पूछें...",
+    search_placeholder: "जनगणना या HLB ब्लॉक के बारे में पूछें...",
     chat_wa: "व्हाट्सएप पर चैट करें",
     ask_ai: "एआई से पूछें",
     search_records: "रिकॉर्ड खोजें",
-    search_sub: "आवंटित जनगणना कर्मियों और EB ब्लॉकों की सूची देखें।",
+    search_sub: "आवंटित जनगणना कर्मियों और HLB ब्लॉकों की सूची देखें।",
     manuals: "नियमावली",
     manuals_guidelines: "दिशानिर्देश एवं नियमावली",
     supervisor_info: "पर्यवेक्षक विवरण",
@@ -119,11 +119,11 @@ const I18N = {
     nav_alerts: "বিজ্ঞপ্তি",
     nav_settings: "সেটিংস",
     nav_admin: "অ্যাডমিন",
-    search_placeholder: "আদমশুমারি বা EB ব্লক সম্পর্কে প্রশ্ন করুন...",
+    search_placeholder: "আদমশুমারি বা HLB ব্লক সম্পর্কে প্রশ্ন করুন...",
     chat_wa: "হোয়াটসঅ্যাপে চ্যাট করুন",
     ask_ai: "এআই কে জিজ্ঞাসা করুন",
     search_records: "রেকর্ড খুঁজুন",
-    search_sub: "নির্ধারিত আদমশুমারি কর্মী ও EB ব্লকের তালিকা দেখুন।",
+    search_sub: "নির্ধারিত আদমশুমারি কর্মী ও HLB ব্লকের তালিকা দেখুন।",
     manuals: "ম্যানুয়াল",
     manuals_guidelines: "নির্দেশিকা ও ম্যানুয়াল",
     supervisor_info: "তত্ত্বাবধায়কের বিবরণ",
@@ -162,7 +162,7 @@ const isAndroid = typeof window.AndroidBridge !== "undefined";
  */
 function getApiBase() {
   if (window.location.protocol === "file:") {
-    return window.BACKEND_URL || "https://shahinxsha.pythonanywhere.com";
+    return window.BACKEND_URL || "http://10.0.2.2:8080";
   }
   return "";
 }
@@ -173,6 +173,16 @@ function getApiBase() {
  */
 async function apiFetch(path, options = {}) {
   const url = getApiBase() + path;
+  if (state.authToken) {
+    // Auto-attach the bearer token so admin-gated endpoints (and any
+    // per-user endpoints) authenticate without every call site having
+    // to remember to set the header itself.
+    const headers = new Headers(options.headers || {});
+    if (!headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${state.authToken}`);
+    }
+    options = { ...options, headers };
+  }
   return fetch(url, options);
 }
 
@@ -240,6 +250,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (state.authToken && state.currentUser) {
       showAppShell();
       updateUserHeader();
+      applyRoleBasedNav();
       handleRouteFromHash();
     } else {
       showLoginView();
@@ -248,7 +259,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Load initial data
   loadNotifications();
-  loadAdminStats();
 });
 
 window.addEventListener("hashchange", handleRouteFromHash);
@@ -271,6 +281,16 @@ function showAppShell() {
 function navigateTo(viewName, updateHash = true) {
   const validViews = ["home", "search", "chat", "manual", "supervisor", "notifications", "settings", "admin"];
   if (!validViews.includes(viewName)) viewName = "home";
+
+  // Major Issue guard: the admin portal is only for the Technical Assistant
+  // admin account (role === "admin"). Guests and OTP-authenticated field
+  // functionaries are redirected away even if they try to reach #admin
+  // directly via the URL hash.
+  if (viewName === "admin" && (!state.currentUser || state.currentUser.role !== "admin")) {
+    showToast("Admin portal is restricted to Technical Assistants.");
+    viewName = "home";
+    updateHash = true;
+  }
 
   state.activeView = viewName;
   if (updateHash) {
@@ -330,9 +350,30 @@ function navigateTo(viewName, updateHash = true) {
     fetchRecords();
   } else if (viewName === "admin") {
     loadAdminStats();
+    loadAdminNotices();
   } else if (viewName === "notifications") {
     loadNotifications();
+  } else if (viewName === "supervisor") {
+    loadSupervisors();
   }
+}
+
+/**
+ * Major Issue guard (UI side): show/hide the Admin Panel nav entries based
+ * on the signed-in user's role. Only role === "admin" (the seeded
+ * Technical Assistant account, shahinxsha) ever sees these links — guest
+ * and field-functionary sessions never get an admin link to click, on top
+ * of the hash-based redirect in navigateTo() and the backend's
+ * _require_admin() gate on every admin API route.
+ */
+function applyRoleBasedNav() {
+  const isAdmin = !!(state.currentUser && state.currentUser.role === "admin");
+
+  const desktopAdminLink = document.getElementById("nav-desktop-admin");
+  if (desktopAdminLink) desktopAdminLink.classList.toggle("hidden", !isAdmin);
+
+  const mobileAdminLink = document.getElementById("nav-mobile-drawer-admin");
+  if (mobileAdminLink) mobileAdminLink.classList.toggle("hidden", !isAdmin);
 }
 
 // ==================== 4. AUTHENTICATION HANDLERS ====================
@@ -412,6 +453,7 @@ async function handleVerifyOtp(e) {
       closeOtpModal();
       showAppShell();
       updateUserHeader();
+      applyRoleBasedNav();
       navigateTo("home");
       showToast(`Welcome ${data.user.name}!`);
     } else {
@@ -441,6 +483,7 @@ async function handleAdminLogin(e) {
       localStorage.setItem("census_user", JSON.stringify(data.user));
       showAppShell();
       updateUserHeader();
+      applyRoleBasedNav();
       navigateTo("admin");
       showToast("Signed in as Administrator.");
     } else {
@@ -461,6 +504,7 @@ async function handleGuestLogin() {
     localStorage.setItem("census_user", JSON.stringify(data.user));
     showAppShell();
     updateUserHeader();
+    applyRoleBasedNav();
     navigateTo("home");
     showToast("Signed in as Guest.");
   } catch (err) {
@@ -648,7 +692,7 @@ function setSearchFilter(filterName) {
   state.recordsFilter = filterName;
   state.recordsPage = 1;
 
-  ["all", "name", "mobile", "id", "eb"].forEach(f => {
+  ["all", "name", "mobile", "id", "hlb"].forEach(f => {
     const btn = document.getElementById(`filter-${f}`);
     if (btn) {
       if (f === filterName) {
@@ -688,7 +732,7 @@ async function fetchRecords(append = false) {
           <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-8 text-center text-on-surface-variant">
             <span class="material-symbols-outlined text-4xl text-outline mb-2">search_off</span>
             <p class="text-sm font-semibold">No records found matching your query.</p>
-            <p class="text-xs text-outline mt-1">Try changing filter tags or searching by EB block number.</p>
+            <p class="text-xs text-outline mt-1">Try changing filter tags or searching by HLB block number.</p>
           </div>
         `;
       }
@@ -701,7 +745,10 @@ async function fetchRecords(append = false) {
       card.className = "bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/20 p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:bg-surface-container-low transition-all";
       
       const cleanMob = (rec.mobile || "8453441975").replace(/[^0-9]/g, "");
-      const waMsg = `Inquiry regarding ${rec.name} (${rec.eb_number})`;
+      const waMsg = `Inquiry regarding ${rec.name}${rec.hlb_number ? ` (HLB ${rec.hlb_number})` : ""}`;
+      const mapsLinkHtml = rec.maps_url
+        ? `<a href="${escapeAttr(rec.maps_url)}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary hover:underline"><span class="material-symbols-outlined text-[15px]">map</span> ${escapeHtml(rec.area_name || "View Area")}</a>`
+        : "";
 
       card.innerHTML = `
         <div class="flex-1">
@@ -710,9 +757,11 @@ async function fetchRecords(append = false) {
             <span class="text-[10px] px-2 py-0.5 rounded bg-primary-fixed text-primary font-semibold">${escapeHtml(rec.role)}</span>
           </div>
           <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-on-surface-variant mt-1.5">
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">location_on</span> Area: <strong>${escapeHtml(rec.eb_number)}</strong></span>
+            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">tag</span> HLB: <strong>${escapeHtml(rec.hlb_number || "—")}</strong></span>
             <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">badge</span> ID: <code class="font-mono">${escapeHtml(rec.user_id)}</code></span>
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">supervisor_account</span> Supervisor: ${escapeHtml(rec.supervisor || "S. A. Ahmed")}</span>
+            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">supervisor_account</span> Supervisor: ${escapeHtml(rec.supervisor || "—")}</span>
+            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">pin_drop</span> Circle: ${escapeHtml(rec.circle || "—")}</span>
+            ${mapsLinkHtml}
           </div>
         </div>
         <div class="flex items-center gap-2 w-full md:w-auto justify-end pt-3 md:pt-0 border-t border-outline-variant/20 md:border-t-0">
@@ -874,6 +923,189 @@ function filterNotifications(cat) {
     }
   });
   loadNotifications(cat);
+}
+
+// ==================== 8b. ADMIN: ALERTS & NOTICES MANAGEMENT ====================
+// Feature requested alongside the admin-portal lockdown: Technical Assistant
+// admins can broadcast new alerts/notices and remove old ones. Regular
+// guest/field-functionary sessions never reach this UI (admin nav is
+// hidden for them, see applyRoleBasedNav()) and the backend independently
+// enforces this via _require_admin() on the POST/DELETE routes.
+async function loadAdminNotices() {
+  const container = document.getElementById("admin-notices-list");
+  if (!container) return;
+
+  container.innerHTML = `<div class="flex justify-center p-4"><div class="loader-spinner-primary"></div></div>`;
+
+  try {
+    const res = await apiFetch("/api/notifications?category=All");
+    const data = await res.json();
+    container.innerHTML = "";
+
+    if (!data.notifications || data.notifications.length === 0) {
+      container.innerHTML = `<p class="text-xs text-on-surface-variant p-4">No alerts or notices yet. Create one above.</p>`;
+      return;
+    }
+
+    data.notifications.forEach(item => {
+      const row = document.createElement("div");
+      row.className = "flex items-start justify-between gap-3 p-3 rounded-lg border border-outline-variant/30 bg-surface";
+      row.innerHTML = `
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h4 class="text-xs font-bold text-on-surface">${escapeHtml(item.title)}</h4>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-surface-container text-on-surface-variant font-semibold uppercase">${escapeHtml(item.category)}</span>
+            ${item.priority === "urgent" ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-error text-white font-semibold">Urgent</span>' : ''}
+          </div>
+          <p class="text-[11px] text-on-surface-variant mt-1 truncate">${escapeHtml(item.content)}</p>
+        </div>
+        <button onclick="handleDeleteNotice(${item.id})" title="Delete" class="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-error hover:bg-error-container/40 transition-colors">
+          <span class="material-symbols-outlined text-lg">delete</span>
+        </button>
+      `;
+      container.appendChild(row);
+    });
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-error p-4">Could not load alerts/notices.</p>`;
+  }
+}
+
+async function handleCreateNotice(e) {
+  e.preventDefault();
+  const title = document.getElementById("notice-title-input").value.trim();
+  const content = document.getElementById("notice-content-input").value.trim();
+  const category = document.getElementById("notice-category-select").value;
+  const priority = document.getElementById("notice-priority-select").value;
+
+  if (!title || !content) {
+    showToast("Title and content are required.");
+    return;
+  }
+
+  try {
+    const res = await apiFetch("/api/notifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, content, category, priority, badge: priority === "urgent" ? "Urgent" : "New" })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast("Alert/Notice broadcasted successfully.");
+      document.getElementById("notice-title-input").value = "";
+      document.getElementById("notice-content-input").value = "";
+      loadAdminNotices();
+      loadNotifications();
+    } else {
+      showToast(data.error || "Failed to broadcast.");
+    }
+  } catch (err) {
+    showToast("Network error broadcasting notice.");
+  }
+}
+
+async function handleDeleteNotice(id) {
+  try {
+    const res = await apiFetch(`/api/notifications/${id}`, { method: "DELETE" });
+    const data = await res.json();
+    if (data.success) {
+      showToast("Notice deleted.");
+      loadAdminNotices();
+      loadNotifications();
+    } else {
+      showToast(data.error || "Failed to delete notice.");
+    }
+  } catch (err) {
+    showToast("Network error deleting notice.");
+  }
+}
+
+// ==================== 8c. SUPERVISOR LIST ====================
+// Replaces the old single hardcoded "S. A. Ahmed" profile: this fetches
+// the real, searchable list of supervisors (cross-referenced from both
+// the All_Users and HLB Allocation Excel sheets) from /api/records/supervisor.
+async function loadSupervisors() {
+  const container = document.getElementById("supervisors-list");
+  if (!container) return;
+  const q = (document.getElementById("supervisor-search-input") || {}).value || "";
+
+  container.innerHTML = `<div class="flex justify-center p-8"><div class="loader-spinner-primary"></div></div>`;
+
+  try {
+    const res = await apiFetch(`/api/records/supervisor?q=${encodeURIComponent(q.trim())}`);
+    const data = await res.json();
+    container.innerHTML = "";
+
+    // Render the two Technical Assistants at the top — they are always
+    // reachable regardless of search, since they support every circle.
+    const taContainer = document.getElementById("supervisor-tech-assistants");
+    if (taContainer && data.technical_assistants) {
+      taContainer.innerHTML = data.technical_assistants.map(ta => `
+        <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-4 flex items-center justify-between gap-3">
+          <div>
+            <p class="text-sm font-bold text-on-surface">${escapeHtml(ta.name)}</p>
+            <p class="text-[11px] text-tertiary-container font-semibold uppercase tracking-wide">${escapeHtml(ta.designation)}</p>
+            <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(ta.phone)}</p>
+          </div>
+          <a href="${escapeAttr(ta.whatsapp_link)}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-[#25D366] text-white flex items-center justify-center shrink-0" title="WhatsApp">
+            <span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1;">chat</span>
+          </a>
+        </div>
+      `).join("");
+    }
+
+    if (!data.supervisors || data.supervisors.length === 0) {
+      container.innerHTML = `
+        <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-8 text-center text-on-surface-variant">
+          <span class="material-symbols-outlined text-4xl text-outline mb-2">search_off</span>
+          <p class="text-sm font-semibold">No supervisors found matching your search.</p>
+        </div>
+      `;
+      return;
+    }
+
+    data.supervisors.forEach(sup => {
+      const cleanMob = (sup.mobile || "").replace(/[^0-9]/g, "");
+      const initials = sup.name ? sup.name.split(" ").filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase() : "SU";
+      const circlesHtml = (sup.circles || []).filter(Boolean).map(c =>
+        `<span class="px-2.5 py-1 bg-surface-variant text-on-surface rounded-md text-xs font-semibold border border-outline-variant/40">Circle ${escapeHtml(c)}</span>`
+      ).join("") || `<span class="text-xs text-on-surface-variant">No circle on record</span>`;
+      const mapsLinkHtml = sup.maps_url
+        ? `<a href="${escapeAttr(sup.maps_url)}" target="_blank" rel="noopener noreferrer" class="flex-1 border border-primary text-primary bg-surface-container-lowest h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-primary-fixed transition-all active:scale-95">
+             <span class="material-symbols-outlined text-lg">map</span><span>View Jurisdiction Area</span>
+           </a>`
+        : "";
+
+      const card = document.createElement("div");
+      card.className = "bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden";
+      card.innerHTML = `
+        <div class="p-5 flex flex-col sm:flex-row sm:items-center gap-4">
+          <div class="w-16 h-16 rounded-full bg-primary-container text-white flex items-center justify-center text-xl font-bold shrink-0">${escapeHtml(initials)}</div>
+          <div class="flex-1 min-w-0">
+            <h3 class="text-lg font-bold text-on-surface truncate">${escapeHtml(sup.name)}</h3>
+            <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(sup.mobile || "No mobile on record")} • ID: <code class="font-mono">${escapeHtml(sup.user_id)}</code></p>
+            <p class="text-xs text-on-surface-variant mt-0.5">${sup.hlb_count} HLB${sup.hlb_count === 1 ? "" : "s"} allocated${sup.area_name ? " • " + escapeHtml(sup.area_name) : ""}</p>
+            <div class="flex flex-wrap gap-1.5 mt-2">${circlesHtml}</div>
+          </div>
+        </div>
+        <div class="px-5 pb-5 flex flex-col sm:flex-row gap-2">
+          ${cleanMob ? `
+          <a href="https://wa.me/91${escapeAttr(cleanMob)}?text=${encodeURIComponent('Hello ' + sup.name + ', I am reaching out regarding HLB operations.')}" target="_blank" rel="noopener noreferrer"
+            class="flex-1 bg-primary text-white h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-primary-container transition-all active:scale-95">
+            <span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1;">chat</span><span>Message on WhatsApp</span>
+          </a>` : ""}
+          ${mapsLinkHtml}
+        </div>
+      `;
+      container.appendChild(card);
+    });
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-error p-4">Error loading supervisors.</p>`;
+  }
+}
+
+function debounceSupervisorSearch() {
+  clearTimeout(state.searchDebounceTimer);
+  state.searchDebounceTimer = setTimeout(loadSupervisors, 300);
 }
 
 // ==================== 9. ADMIN PANEL & FILE UPLOADERS ====================

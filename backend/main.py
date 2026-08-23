@@ -8,6 +8,7 @@ import sys
 import json
 import logging
 from datetime import datetime
+from urllib.parse import quote as requests_quote
 from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -19,15 +20,14 @@ from .llm_provider import answer_query
 from .auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
 from .messaging_gateway import (
     handle_whatsapp_webhook, handle_telegram_webhook, get_channel_status,
-    WHATSAPP_VERIFY_TOKEN, TECH_ASSISTANT_NAME, TECH_ASSISTANT_PHONE, WHATSAPP_DEEP_LINK, SUPERVISOR_NAME
+    WHATSAPP_VERIFY_TOKEN, TECH_ASSISTANT_NAME, TECH_ASSISTANT_PHONE, WHATSAPP_DEEP_LINK,
+    TECHNICAL_ASSISTANTS
 )
+
+CIRCLE_NAME = os.environ.get("CIRCLE_NAME", "Lakhipur Circle")
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
-# Admin-uploaded files must land in the persistent data volume, not the
-# (ephemeral, image-baked) app root, or they vanish on every redeploy.
-DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
-os.makedirs(DATA_DIR, exist_ok=True)
 
 logger = logging.getLogger("CensusServer")
 logging.basicConfig(level=logging.INFO)
@@ -37,6 +37,27 @@ CORS(app)
 
 # Initialize database on startup
 init_database()
+
+# ----------------- Admin Authorization Helpers -----------------
+def _authenticated_user():
+    """Return the JWT payload for the request's Authorization header, or None."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return None
+    return verify_jwt_token(auth_header[7:])
+
+def _require_admin():
+    """
+    Guard for admin-only routes. Only the Technical Assistant admin account
+    (see auth.admin_login / database's seeded admin_users row) can pass this
+    check — guest sessions and OTP-authenticated field functionaries always
+    get role 'guest'/'enumerator'/'supervisor', never 'admin'.
+    Returns a Flask error response if unauthorized, else None.
+    """
+    user = _authenticated_user()
+    if not user or user.get("role") != "admin":
+        return jsonify({"success": False, "error": "Admin authentication required."}), 403
+    return None
 
 # ----------------- Static Frontend Routes -----------------
 @app.route("/")
@@ -100,10 +121,28 @@ def chat_endpoint():
     return jsonify(result)
 
 # ----------------- Census Records Search Endpoints -----------------
+def _area_info(circle_no):
+    """
+    Best-effort "allocated area" label + Google Maps link for a supervisory
+    circle. The source Excel sheets (All_Users.xlsx / HLB Allocation.xlsx)
+    only carry numeric State/District/Sub-District census codes and a blank
+    Village/Town column — there is no actual village/area name or GPS data
+    to draw on. Until that data is supplied, this falls back to the circle
+    name/number, which is real but not block-precise.
+    """
+    if not circle_no:
+        return None, None
+    label = f"{CIRCLE_NAME} — Supervisory Circle {circle_no}"
+    maps_url = "https://www.google.com/maps/search/?api=1&query=" + \
+        requests_quote(f"{CIRCLE_NAME} Circle {circle_no}, Assam, India")
+    return label, maps_url
+
 @app.route("/api/records/search", methods=["GET"])
 def records_search():
     q = request.args.get("q", "").strip()
-    filter_by = request.args.get("filter", "all") # 'all', 'name', 'mobile', 'id', 'eb'
+    filter_by = request.args.get("filter", "all") # 'all', 'name', 'mobile', 'id', 'hlb'
+    if filter_by == "eb":
+        filter_by = "hlb"  # accept the old filter value for backward compatibility
     page = int(request.args.get("page", 1))
     limit = int(request.args.get("limit", 15))
     offset = (page - 1) * limit
@@ -124,10 +163,11 @@ def records_search():
         elif filter_by == "id":
             where_clauses.append("user_id LIKE ?")
             params.append(f"%{q}%")
-        elif filter_by == "eb":
-            # Search HLB table directly
+        elif filter_by == "hlb":
+            # Search the HLB allocation sheet directly, joined back to the
+            # functionaries sheet for the enumerator's mobile number.
             cursor.execute("""
-                SELECT h.*, f.mobile_number, f.district, f.sub_district 
+                SELECT h.*, f.mobile_number, f.district, f.sub_district
                 FROM hlb_allocations h
                 LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
                 WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
@@ -135,21 +175,27 @@ def records_search():
             """, (f"%{q}%", f"%{q}%", limit, offset))
             hlb_rows = [dict(r) for r in cursor.fetchall()]
             conn.close()
-            return jsonify({
-                "query": q,
-                "filter": filter_by,
-                "page": page,
-                "results": [{
+            results = []
+            for r in hlb_rows:
+                area_name, maps_url = _area_info(r["supervisory_circle_no"])
+                results.append({
                     "id": r["id"],
                     "name": r["enumerator_name"],
                     "role": f"Enumerator (HLB {r['hlb_no']})",
                     "user_id": r["enumerator_user_id"],
-                    "mobile": r.get("mobile_number") or "+91 84534 41975",
-                    "eb_number": f"EB {r['hlb_no']}",
+                    "mobile": r.get("mobile_number") or "",
+                    "hlb_number": r["hlb_no"],
                     "supervisor": r["supervisor_name"],
                     "circle": r["supervisory_circle_no"],
-                    "allotment_date": r["allotment_date"]
-                } for r in hlb_rows],
+                    "allotment_date": r["allotment_date"],
+                    "area_name": area_name,
+                    "maps_url": maps_url
+                })
+            return jsonify({
+                "query": q,
+                "filter": filter_by,
+                "page": page,
+                "results": results,
                 "total": len(hlb_rows)
             })
         else:
@@ -170,11 +216,18 @@ def records_search():
 
     results = []
     for r in rows:
-        # Cross reference with HLB allocation if available
-        cursor.execute("SELECT hlb_no, supervisor_name FROM hlb_allocations WHERE enumerator_user_id = ? LIMIT 1", (r["user_id"],))
+        # Cross-reference the functionary against the HLB allocation sheet
+        # (matched on Enumerator User ID) to pull the HLB number, supervisor
+        # name, and circle it's tied to.
+        cursor.execute("""
+            SELECT hlb_no, supervisor_name, supervisory_circle_no
+            FROM hlb_allocations WHERE enumerator_user_id = ? LIMIT 1
+        """, (r["user_id"],))
         hlb_match = cursor.fetchone()
-        eb_str = f"EB {hlb_match['hlb_no']}" if hlb_match else "General Jurisdiction"
-        sup_str = hlb_match["supervisor_name"] if hlb_match else SUPERVISOR_NAME
+        hlb_no = hlb_match["hlb_no"] if hlb_match else None
+        sup_str = hlb_match["supervisor_name"] if hlb_match else None
+        circle_no = hlb_match["supervisory_circle_no"] if hlb_match else None
+        area_name, maps_url = _area_info(circle_no)
 
         results.append({
             "id": r["id"],
@@ -182,10 +235,13 @@ def records_search():
             "role": r["functionary_type"],
             "user_id": r["user_id"],
             "mobile": r["mobile_number"],
-            "eb_number": eb_str,
+            "hlb_number": hlb_no,
             "supervisor": sup_str,
-            "district": r["district"] or "Goalpara",
-            "sub_district": r["sub_district"] or "Lakhipur",
+            "circle": circle_no,
+            "district": r["district"] or "",
+            "sub_district": r["sub_district"] or "",
+            "area_name": area_name,
+            "maps_url": maps_url,
             "status": r["status"]
         })
 
@@ -200,33 +256,62 @@ def records_search():
     })
 
 @app.route("/api/records/supervisor", methods=["GET"])
-def supervisor_details():
+def supervisor_list():
+    """List actual supervisors from the functionaries sheet (not a single
+    hardcoded profile), each with their circle(s) and how many HLBs/enumerators
+    report to them per the HLB allocation sheet — the two source sheets
+    joined on supervisor name."""
+    q = request.args.get("q", "").strip()
+    limit = int(request.args.get("limit", 30))
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Fetch distinct EBs under this supervisor or circle
-    cursor.execute("""
-        SELECT DISTINCT hlb_no FROM hlb_allocations 
-        WHERE supervisor_name LIKE '%AHMED%' OR supervisory_circle_no = '001'
-        ORDER BY hlb_no ASC
-        LIMIT 10
-    """)
-    eb_list = [f"EB {r['hlb_no']}" for r in cursor.fetchall()]
-    if not eb_list:
-        eb_list = ["EB 12", "EB 13", "EB 14", "EB 15", "EB 16"]
+
+    where_sql = "WHERE functionary_type LIKE '%Supervisor%'"
+    params = []
+    if q:
+        where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
+        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+
+    cursor.execute(f"""
+        SELECT * FROM functionaries {where_sql} ORDER BY name ASC LIMIT ?
+    """, params + [limit])
+    sup_rows = cursor.fetchall()
+
+    supervisors = []
+    for r in sup_rows:
+        cursor.execute("""
+            SELECT DISTINCT supervisory_circle_no FROM hlb_allocations
+            WHERE supervisor_name = ? OR supervisor_name LIKE ?
+        """, (r["name"], f"%{r['name']}%"))
+        circles = [c["supervisory_circle_no"] for c in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT COUNT(*) FROM hlb_allocations
+            WHERE supervisor_name = ? OR supervisor_name LIKE ?
+        """, (r["name"], f"%{r['name']}%"))
+        hlb_count = cursor.fetchone()[0]
+
+        area_name, maps_url = _area_info(circles[0] if circles else None)
+        supervisors.append({
+            "name": r["name"],
+            "user_id": r["user_id"],
+            "mobile": r["mobile_number"],
+            "circles": circles,
+            "hlb_count": hlb_count,
+            "district": r["district"] or "",
+            "sub_district": r["sub_district"] or "",
+            "area_name": area_name,
+            "maps_url": maps_url,
+            "status": r["status"]
+        })
 
     conn.close()
     return jsonify({
-        "name": SUPERVISOR_NAME,
-        "designation": "Zonal Supervisor",
-        "sector": "North Sector",
-        "phone": "+91 84534 41975",
-        "email": "s.ahmed@census.gov.in",
-        "assigned_ebs": eb_list,
-        "technical_assistant": {
-            "name": TECH_ASSISTANT_NAME,
-            "phone": TECH_ASSISTANT_PHONE,
-            "whatsapp_link": WHATSAPP_DEEP_LINK
-        }
+        "query": q,
+        "supervisors": supervisors,
+        "total": len(supervisors),
+        "technical_assistants": TECHNICAL_ASSISTANTS
     })
 
 # ----------------- PDF Manual Assistant Endpoints -----------------
@@ -276,6 +361,10 @@ def get_notifications():
 
 @app.route("/api/notifications", methods=["POST"])
 def create_notification():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     data = request.get_json() or {}
     title = data.get("title", "")
     content = data.get("content", "")
@@ -293,12 +382,34 @@ def create_notification():
         VALUES (?, ?, ?, ?, ?, 'Just now')
     """, (title, content, category, priority, badge))
     conn.commit()
+    new_id = cursor.lastrowid
     conn.close()
-    return jsonify({"success": True, "message": "Notification broadcasted successfully."})
+    return jsonify({"success": True, "message": "Notification broadcasted successfully.", "id": new_id})
+
+@app.route("/api/notifications/<int:notification_id>", methods=["DELETE"])
+def delete_notification(notification_id):
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM notifications WHERE id = ?", (notification_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    if not deleted:
+        return jsonify({"success": False, "error": "Notification not found."}), 404
+    return jsonify({"success": True, "message": "Notification deleted."})
 
 # ----------------- Admin Control Center Endpoints -----------------
 @app.route("/api/admin/stats", methods=["GET"])
 def admin_stats():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -337,6 +448,10 @@ def admin_stats():
 
 @app.route("/api/admin/force-sync", methods=["POST"])
 def admin_force_sync():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     try:
         res = run_full_ingestion()
         return jsonify({"success": True, "details": res})
@@ -346,6 +461,10 @@ def admin_force_sync():
 
 @app.route("/api/admin/upload-excel", methods=["POST"])
 def upload_excel():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files["file"]
@@ -353,7 +472,7 @@ def upload_excel():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
-    target_path = os.path.join(DATA_DIR, filename)
+    target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
     # Ingest based on filename
@@ -369,6 +488,10 @@ def upload_excel():
 
 @app.route("/api/admin/upload-pdf", methods=["POST"])
 def upload_pdf():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     if "file" not in request.files:
         return jsonify({"error": "No file part"}), 400
     file = request.files["file"]
@@ -376,7 +499,7 @@ def upload_pdf():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
-    target_path = os.path.join(DATA_DIR, filename)
+    target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
     cnt = ingest_pdf_manuals()
@@ -387,6 +510,10 @@ def upload_pdf():
 
 @app.route("/api/admin/logs", methods=["GET"])
 def admin_logs():
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 20")

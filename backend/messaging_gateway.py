@@ -21,11 +21,30 @@ WHATSAPP_VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "census_assistan
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "")
 
-# Technical Assistant details for WhatsApp deep links
-TECH_ASSISTANT_PHONE = "+91 84534 41975"
-TECH_ASSISTANT_NAME = "Shahin Sha A."
-SUPERVISOR_NAME = "S. A. Ahmed"
-WHATSAPP_DEEP_LINK = "https://wa.me/918453441975"
+# There are two Technical Assistants who can be reached for support and who
+# are the only two people authorized to log into the admin portal.
+TECHNICAL_ASSISTANTS = [
+    {
+        "name": "Shahin Sha A.",
+        "phone": "+91 84534 41975",
+        "whatsapp_number": "918453441975",
+        "whatsapp_link": "https://wa.me/918453441975",
+        "designation": "Technical Assistant"
+    },
+    {
+        "name": "S. A. Ahmed",
+        "phone": "+91 69019 80926",
+        "whatsapp_number": "916901980926",
+        "whatsapp_link": "https://wa.me/916901980926",
+        "designation": "Technical Assistant"
+    }
+]
+
+# Backward-compatible aliases: the primary/first technical assistant, used
+# wherever a single contact needs to be shown (e.g. AI chat/webhook footers).
+TECH_ASSISTANT_NAME = TECHNICAL_ASSISTANTS[0]["name"]
+TECH_ASSISTANT_PHONE = TECHNICAL_ASSISTANTS[0]["phone"]
+WHATSAPP_DEEP_LINK = TECHNICAL_ASSISTANTS[0]["whatsapp_link"]
 
 FALLBACK_HIERARCHY = [
     {
@@ -68,9 +87,9 @@ def get_channel_status() -> Dict[str, Any]:
         "technical_assistant": {
             "name": TECH_ASSISTANT_NAME,
             "phone": TECH_ASSISTANT_PHONE,
-            "supervisor": SUPERVISOR_NAME,
             "whatsapp_link": WHATSAPP_DEEP_LINK
         },
+        "technical_assistants": TECHNICAL_ASSISTANTS,
         "channels": FALLBACK_HIERARCHY,
         "justification": (
             "1. WhatsApp is the primary communication channel widely adopted by field enumerators in India.\n"
@@ -161,7 +180,7 @@ def handle_telegram_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
                 f"🏛️ *Welcome to Census Assistant AI*\n"
                 f"*Lakhipur Circle*\n\n"
                 f"Ask any question about:\n"
-                f"• Enumerator & Supervisor assignments (e.g. *Who is assigned to EB 12?*)\n"
+                f"• Enumerator & Supervisor assignments (e.g. *Who is assigned to HLB 12?*)\n"
                 f"• Census procedural rules and household definitions\n"
                 f"• Search functionaries by name or phone\n\n"
                 f"Technical Assistant: *{TECH_ASSISTANT_NAME}* ({TECH_ASSISTANT_PHONE})"

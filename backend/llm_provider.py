@@ -22,7 +22,9 @@ SYSTEM_PROMPTS = {
         "1. DO NOT HALLUCINATE. Answer only what is stated in the provided context.\n"
         "2. If the information is not in the context, explicitly state: 'This information is not available in the uploaded Census records or manuals.'\n"
         "3. Always cite your sources at the bottom (e.g. 'Source: Census Record DB - 2024' or 'Source: Census Manual 2024, Page X').\n"
-        "4. When technical assistance is needed, remind the user to contact Technical Assistant Shahin Sha A. (+91 84534 41975) on WhatsApp.\n"
+        "4. When technical assistance is needed, remind the user to contact one of the two Technical Assistants: "
+        "Shahin Sha A. (+91 84534 41975) or S. A. Ahmed (+91 69019 80926) on WhatsApp. Neither of them is a supervisor "
+        "— real supervisor names come only from the Census Records context provided to you.\n"
         "5. Keep responses professional, structured, and easy to read."
     ),
     "as": (
@@ -49,14 +51,14 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     manuals = context.get("manual_results", [])
     intent = context.get("intent", "GENERAL")
 
-    # 1. EB / HLB Assignment queries
+    # 1. HLB Assignment queries (still recognizes the legacy "eb"/"block" wording)
     eb_match = re.search(r'\b(?:eb|hlb|block)\s*#?\s*0*(\d+)\b', q_lower)
     if eb_match and records:
         rec = records[0]
         if rec.get("type") == "hlb_allocation":
             if lang == "as":
                 return (
-                    f"**EB / HLB {rec['hlb_no']}** ৰ তথ্য:\n"
+                    f"**HLB {rec['hlb_no']}** ৰ তথ্য:\n"
                     f"• গণনাকাৰী (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• পৰ্যবেক্ষক (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• চাৰ্কেল নং: {rec['circle_no']} | আবণ্টন তাৰিখ: {rec['allotment_date']}\n"
@@ -66,7 +68,7 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                 )
             elif lang == "hi":
                 return (
-                    f"**EB / HLB {rec['hlb_no']}** का विवरण:\n"
+                    f"**HLB {rec['hlb_no']}** का विवरण:\n"
                     f"• प्रगणक (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• पर्यवेक्षक (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• सर्कल सं.: {rec['circle_no']} | आवंटन तिथि: {rec['allotment_date']}\n"
@@ -76,7 +78,7 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                 )
             elif lang == "bn":
                 return (
-                    f"**EB / HLB {rec['hlb_no']}** এর বিবরণ:\n"
+                    f"**HLB {rec['hlb_no']}** এর বিবরণ:\n"
                     f"• গণনাকারী (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• তত্ত্বাবধায়ক (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• সার্কেল নং: {rec['circle_no']} | বরাদ্দের তারিখ: {rec['allotment_date']}\n"
@@ -86,7 +88,7 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                 )
             else:
                 return (
-                    f"**EB / HLB {rec['hlb_no']} Assignment Details:**\n\n"
+                    f"**HLB {rec['hlb_no']} Assignment Details:**\n\n"
                     f"• **Assigned Enumerator:** {rec['enumerator_name']} (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• **Supervisor:** {rec['supervisor_name']}\n"
                     f"• **Supervisory Circle:** {rec['circle_no']}\n"
@@ -96,48 +98,76 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"📌 *Source: {rec['source']}*"
                 )
 
-    # 2. Supervisor info query
-    if ("supervisor" in q_lower or "s. a. ahmed" in q_lower) and not any(w in q_lower for w in ["duty", "duties", "role", "guideline"]):
-        if lang == "as":
-            return (
-                f"**পৰ্যবেক্ষক বিৱৰণ (Supervisor Details):**\n"
-                f"• জ'নেল ছুপাৰভাইজাৰ: **এছ. এ. আহমেদ (S. A. Ahmed)**\n"
-                f"• কাৰিকৰী সহায়ক: **শ্বাহীন শ্বাহ এ. (Shahin Sha A.)**\n"
-                f"• ফোন নম্বৰ: **+91 84534 41975** (WhatsApp)\n"
-                f"• এলেকা: উত্তৰ ছেক্টৰ, লাক্ষীপুৰ চাৰ্কেল\n"
-                f"• আৱণ্টিত ব্লক: EB 12, EB 13, EB 14...\n\n"
-                f"📌 *উৎস: Census Record DB - 2024*"
-            )
-        elif lang == "hi":
-            return (
-                f"**पर्यवेक्षक विवरण (Supervisor Details):**\n"
-                f"• जोनल सुपरवाइजर: **एस. ए. अहमद (S. A. Ahmed)**\n"
-                f"• तकनीकी सहायक: **शाहीन शाह ए. (Shahin Sha A.)**\n"
-                f"• फोन नंबर: **+91 84534 41975** (WhatsApp)\n"
-                f"• क्षेत्र: उत्तरी सेक्टर, लखीपुर सर्कल\n"
-                f"• आवंटित ब्लॉक: EB 12, EB 13, EB 14...\n\n"
-                f"📌 *स्रोत: Census Record DB - 2024*"
-            )
-        elif lang == "bn":
-            return (
-                f"**তত্ত্বাবধায়ক বিবরণ (Supervisor Details):**\n"
-                f"• জোনাল সুপারভাইজার: **এস. এ. আহমেদ (S. A. Ahmed)**\n"
-                f"• কারিগরি সহকারী: **শাহীন শাহ এ. (Shahin Sha A.)**\n"
-                f"• ফোন নম্বর: **+91 84534 41975** (WhatsApp)\n"
-                f"• এলাকা: উত্তর সেক্টর, লাখিপুর সার্কেল\n"
-                f"• নির্ধারিত ব্লক: EB 12, EB 13, EB 14...\n\n"
-                f"📌 *উৎস: Census Record DB - 2024*"
-            )
+    # 2. Supervisor info query. S. A. Ahmed is a Technical Assistant, NOT a
+    # supervisor — real supervisor names/circles only ever come from an
+    # actual matched HLB allocation record (cross-referenced from both
+    # Excel sheets). If none matched this query, point the user at the
+    # searchable Supervisors tab instead of guessing a name.
+    if "supervisor" in q_lower and not any(w in q_lower for w in ["duty", "duties", "role", "guideline"]):
+        hlb_rec = next((r for r in records if r.get("type") == "hlb_allocation" and r.get("supervisor_name")), None)
+        if hlb_rec:
+            if lang == "as":
+                return (
+                    f"**পৰ্যবেক্ষক বিৱৰণ (Supervisor Details):**\n"
+                    f"• পৰ্যবেক্ষক: **{hlb_rec['supervisor_name']}**\n"
+                    f"• চাৰ্কেল নং: {hlb_rec['circle_no']} | HLB: {hlb_rec['hlb_no']}\n"
+                    f"• গণনাকাৰী: {hlb_rec['enumerator_name']}\n\n"
+                    f"কাৰিকৰী সহায়ৰ বাবে যোগাযোগ কৰক: **শ্বাহীন শ্বাহ এ.** (+91 84534 41975) বা **এছ. এ. আহমেদ** (+91 69019 80926)\n\n"
+                    f"📌 *উৎস: {hlb_rec['source']}*"
+                )
+            elif lang == "hi":
+                return (
+                    f"**पर्यवेक्षक विवरण (Supervisor Details):**\n"
+                    f"• पर्यवेक्षक: **{hlb_rec['supervisor_name']}**\n"
+                    f"• सर्कल सं.: {hlb_rec['circle_no']} | HLB: {hlb_rec['hlb_no']}\n"
+                    f"• प्रगणक: {hlb_rec['enumerator_name']}\n\n"
+                    f"तकनीकी सहायता के लिए संपर्क करें: **शाहीन शाह ए.** (+91 84534 41975) या **एस. ए. अहमद** (+91 69019 80926)\n\n"
+                    f"📌 *स्रोत: {hlb_rec['source']}*"
+                )
+            elif lang == "bn":
+                return (
+                    f"**তত্ত্বাবধায়ক বিবরণ (Supervisor Details):**\n"
+                    f"• তত্ত্বাবধায়ক: **{hlb_rec['supervisor_name']}**\n"
+                    f"• সার্কেল নং: {hlb_rec['circle_no']} | HLB: {hlb_rec['hlb_no']}\n"
+                    f"• গণনাকারী: {hlb_rec['enumerator_name']}\n\n"
+                    f"কারিগরি সহায়তার জন্য যোগাযোগ করুন: **শাহীন শাহ এ.** (+91 84534 41975) বা **এস. এ. আহমেদ** (+91 69019 80926)\n\n"
+                    f"📌 *উৎস: {hlb_rec['source']}*"
+                )
+            else:
+                return (
+                    f"**Supervisor Information:**\n\n"
+                    f"• **Supervisor Name:** {hlb_rec['supervisor_name']}\n"
+                    f"• **Supervisory Circle:** {hlb_rec['circle_no']}\n"
+                    f"• **HLB:** {hlb_rec['hlb_no']} | **Enumerator:** {hlb_rec['enumerator_name']}\n\n"
+                    f"For technical assistance, contact **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp.\n\n"
+                    f"📌 *Source: {hlb_rec['source']}*"
+                )
         else:
-            return (
-                f"**Zonal Supervisor Information:**\n\n"
-                f"• **Supervisor Name:** S. A. Ahmed\n"
-                f"• **Designation:** Zonal Supervisor, North Sector (Lakhipur Circle)\n"
-                f"• **Technical Assistant:** Shahin Sha A. (+91 84534 41975)\n"
-                f"• **Assigned EB Range:** EB 12, EB 13, EB 14...\n\n"
-                f"Tap **Chat on WhatsApp** on the dashboard or supervisor screen to message directly.\n\n"
-                f"📌 *Source: Census Record DB - 2024*"
-            )
+            if lang == "as":
+                return (
+                    f"এই প্ৰশ্নটোৰ সৈতে মিল থকা কোনো নিৰ্দিষ্ট পৰ্যবেক্ষকৰ নথি পোৱা নগ'ল।\n"
+                    f"অনুগ্ৰহ কৰি এপ্‌টোৰ **পৰ্যবেক্ষক** পৃষ্ঠাত নাম, ID বা মোবাইল নম্বৰেৰে সন্ধান কৰক।\n\n"
+                    f"কাৰিকৰী সহায়ৰ বাবে যোগাযোগ কৰক: **শ্বাহীন শ্বাহ এ.** (+91 84534 41975) বা **এছ. এ. আহমেদ** (+91 69019 80926)"
+                )
+            elif lang == "hi":
+                return (
+                    f"इस प्रश्न से मेल खाता कोई विशिष्ट पर्यवेक्षक रिकॉर्ड नहीं मिला।\n"
+                    f"कृपया ऐप के **पर्यवेक्षक** पृष्ठ पर नाम, ID या मोबाइल नंबर से खोजें।\n\n"
+                    f"तकनीकी सहायता के लिए संपर्क करें: **शाहीन शाह ए.** (+91 84534 41975) या **एस. ए. अहमद** (+91 69019 80926)"
+                )
+            elif lang == "bn":
+                return (
+                    f"এই প্রশ্নের সাথে মিলে যায় এমন কোনো নির্দিষ্ট তত্ত্বাবধায়ক রেকর্ড পাওয়া যায়নি।\n"
+                    f"অনুগ্রহ করে অ্যাপের **তত্ত্বাবধায়ক** পৃষ্ঠায় নাম, ID বা মোবাইল নম্বর দিয়ে খুঁজুন।\n\n"
+                    f"কারিগরি সহায়তার জন্য যোগাযোগ করুন: **শাহীন শাহ এ.** (+91 84534 41975) বা **এস. এ. আহমেদ** (+91 69019 80926)"
+                )
+            else:
+                return (
+                    f"I could not find a specific supervisor record matching this query.\n"
+                    f"Try searching by name, ID, or mobile number on the app's **Supervisor** tab — it lists every "
+                    f"supervisor cross-referenced from the census records with their circle and HLB count.\n\n"
+                    f"For technical assistance, contact **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
+                )
 
     # 3. Person Name lookup
     if records and intent == "RECORD_SEARCH":
@@ -172,29 +202,29 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     if lang == "as":
         return (
             f"ক্ষমা কৰিব, এই প্ৰশ্নৰ বাবে কোনো তথ্য পোৱা নগ'ল।\n"
-            f"আপুনি কোনো বিশেষ ব্লক নম্বৰ (যেনে: EB 12), পৰ্যবেক্ষকৰ নাম বা নিয়ম নিৰ্দেশনা সম্পৰ্কে সুধিব পাৰে।\n\n"
+            f"আপুনি কোনো বিশেষ ব্লক নম্বৰ (যেনে: HLB 12), পৰ্যবেক্ষকৰ নাম বা নিয়ম নিৰ্দেশনা সম্পৰ্কে সুধিব পাৰে।\n\n"
             f"কাৰিকৰী সহায়ৰ বাবে যোগাযোগ কৰক: **শ্বাহীন শ্বাহ এ.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
         )
     elif lang == "hi":
         return (
             f"क्षमा करें, इस प्रश्न के लिए डेटाबेस में कोई विशिष्ट रिकॉर्ड नहीं मिला।\n"
-            f"आप किसी विशेष ब्लॉक नंबर (जैसे EB 12), पर्यवेक्षक का नाम या जनगणना नियमावली के बारे में पूछ सकते हैं।\n\n"
+            f"आप किसी विशेष ब्लॉक नंबर (जैसे HLB 12), पर्यवेक्षक का नाम या जनगणना नियमावली के बारे में पूछ सकते हैं।\n\n"
             f"तकनीकी सहायता के लिए संपर्क करें: **शाहीन शाह ए.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
         )
     elif lang == "bn":
         return (
             f"দুঃখিত, এই প্রশ্নের জন্য কোনো রেকর্ড পাওয়া যায়নি।\n"
-            f"আপনি নির্দিষ্ট ব্লক নম্বর (যেমন EB 12), সুপারভাইজারের নাম বা নির্দেশিকা সম্পর্কে জানতে চাইতে পারেন।\n\n"
+            f"আপনি নির্দিষ্ট ব্লক নম্বর (যেমন HLB 12), সুপারভাইজারের নাম বা নির্দেশিকা সম্পর্কে জানতে চাইতে পারেন।\n\n"
             f"কারিগরি সহায়তার জন্য যোগাযোগ করুন: **শাহীন শাহ এ.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
         )
     else:
         return (
             f"I could not locate specific records matching your query in the current dataset.\n\n"
             f"You can try searching for:\n"
-            f"• An Enumeration Block (e.g. *'Who is assigned to EB 12?'*)\n"
+            f"• A House Listing Block / HLB (e.g. *'Who is assigned to HLB 12?'*)\n"
             f"• Supervisor details (e.g. *'Show supervisor details'*)\n"
             f"• Manual guidelines (e.g. *'What are the duties of a supervisor?'* or *'Household definition criteria'*)\n\n"
-            f"For direct field assistance, please reach out to Technical Assistant **Shahin Sha A.** (+91 84534 41975) on WhatsApp."
+            f"For direct field assistance, please reach out to Technical Assistant **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
         )
 
 def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any], lang: str = "en") -> Optional[str]:

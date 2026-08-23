@@ -262,20 +262,11 @@ def init_database():
             """, (k, v))
 
         # ------------------------------------------------------------------ #
-        # Seed initial notifications (only if table is empty)                  #
+        # Notifications are never auto-seeded with placeholder/mockup content.
+        # The table starts empty and is only ever populated by real admin
+        # broadcasts via POST /api/notifications (see main.py), so nothing
+        # here can resurface stale demo alerts after a force sync or restart.
         # ------------------------------------------------------------------ #
-        cursor.execute("SELECT COUNT(*) FROM notifications")
-        if cursor.fetchone()[0] == 0:
-            sample_notifs = [
-                ("Meeting Schedule - Oct 25", "Mandatory briefing for regional coordinators regarding data collection protocols and verification workflows.", "Notices", "normal", "Oct 25", "2 hours ago"),
-                ("New Demographic Database Uploaded", "The latest demographic dataset for Lakhipur Circle has been successfully integrated into the central knowledge repository.", "Alerts", "normal", "Database", "Yesterday"),
-                ("Census Deadline Extension", "Due to field operations requirements in northern districts, the house listing submission deadline has been extended by 48 hours.", "Alerts", "urgent", "Urgent", "Oct 20")
-            ]
-            for title, content, cat, prio, badge, ts in sample_notifs:
-                cursor.execute("""
-                    INSERT INTO notifications (title, content, category, priority, badge, timestamp_str)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (title, content, cat, prio, badge, ts))
 
         # ------------------------------------------------------------------ #
         # Seed initial activity logs (only if table is empty)                  #

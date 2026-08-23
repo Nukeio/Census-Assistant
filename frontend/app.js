@@ -1170,18 +1170,27 @@ async function loadSupervisors() {
     // reachable regardless of search, since they support every circle.
     const taContainer = document.getElementById("supervisor-tech-assistants");
     if (taContainer && data.technical_assistants) {
-      taContainer.innerHTML = data.technical_assistants.map(ta => `
+      taContainer.innerHTML = data.technical_assistants.map(ta => {
+        const initials = ta.name ? ta.name.split(" ").filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase() : "TA";
+        const avatarHtml = ta.photo
+          ? `<img src="${escapeAttr(ta.photo)}" alt="${escapeAttr(ta.name)}" class="w-11 h-11 rounded-full object-cover shrink-0 border border-outline-variant/30">`
+          : `<div class="w-11 h-11 rounded-full bg-primary-container text-white flex items-center justify-center text-sm font-bold shrink-0">${initials}</div>`;
+        return `
         <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-4 flex items-center justify-between gap-3">
-          <div>
-            <p class="text-sm font-bold text-on-surface">${escapeHtml(ta.name)}</p>
-            <p class="text-[11px] text-tertiary-container font-semibold uppercase tracking-wide">${escapeHtml(ta.designation)}</p>
-            <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(ta.phone)}</p>
+          <div class="flex items-center gap-3 min-w-0">
+            ${avatarHtml}
+            <div class="min-w-0">
+              <p class="text-sm font-bold text-on-surface truncate">${escapeHtml(ta.name)}</p>
+              <p class="text-[11px] text-tertiary-container font-semibold uppercase tracking-wide">${escapeHtml(ta.designation)}</p>
+              <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(ta.phone)}</p>
+            </div>
           </div>
           <a href="${escapeAttr(ta.whatsapp_link)}" target="_blank" rel="noopener noreferrer" class="w-9 h-9 rounded-full bg-[#25D366] text-white flex items-center justify-center shrink-0" title="WhatsApp">
             <span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1;">chat</span>
           </a>
         </div>
-      `).join("");
+      `;
+      }).join("");
     }
 
     if (!data.supervisors || data.supervisors.length === 0) {

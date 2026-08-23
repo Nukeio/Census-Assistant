@@ -29,14 +29,16 @@ TECHNICAL_ASSISTANTS = [
         "phone": "+91 84534 41975",
         "whatsapp_number": "918453441975",
         "whatsapp_link": "https://wa.me/918453441975",
-        "designation": "Technical Assistant"
+        "designation": "Technical Assistant",
+        "photo": "assets/shahin-sha.png"
     },
     {
         "name": "S. A. Ahmed",
         "phone": "+91 69019 80926",
         "whatsapp_number": "916901980926",
         "whatsapp_link": "https://wa.me/916901980926",
-        "designation": "Technical Assistant"
+        "designation": "Technical Assistant",
+        "photo": "assets/s-ahmed.png"
     }
 ]
 

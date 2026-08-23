@@ -193,5 +193,27 @@ class CensusAssistantTestSuite(unittest.TestCase):
         self.assertIn("files", files_data)
         self.assertGreater(len(files_data["files"]), 0)
 
+    def test_12_supervisor_assigned_enumerators_cross_reference(self):
+        """Verify that supervisors endpoint returns attached assigned enumerators with full details."""
+        resp = self.client.get("/api/records/supervisor")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("supervisors", data)
+        self.assertGreater(len(data["supervisors"]), 0)
+        
+        # Check first supervisor
+        first_sup = data["supervisors"][0]
+        self.assertIn("enumerators", first_sup)
+        self.assertIn("hlb_count", first_sup)
+        self.assertEqual(len(first_sup["enumerators"]), first_sup["hlb_count"])
+        
+        # If supervisor has enumerators, verify their fields
+        if first_sup["enumerators"]:
+            first_enum = first_sup["enumerators"][0]
+            self.assertIn("hlb_no", first_enum)
+            self.assertIn("enumerator_name", first_enum)
+            self.assertIn("enumerator_user_id", first_enum)
+            self.assertIn("mobile", first_enum)
+
 if __name__ == "__main__":
     unittest.main()

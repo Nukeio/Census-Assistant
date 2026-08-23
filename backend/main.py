@@ -303,7 +303,7 @@ def records_search():
     total = cursor.fetchone()[0]
 
     cursor.execute(f"""
-        SELECT f.*, h.hlb_no, h.supervisor_name, h.supervisory_circle_no, d.village_ward_name, d.landmark
+        SELECT f.*, h.hlb_no, h.supervisor_name, h.supervisory_circle_no, d.village_ward_name, d.landmark, d.boundary_description
         FROM functionaries f
         LEFT JOIN hlb_allocations h ON f.user_id = h.enumerator_user_id
         LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
@@ -334,6 +334,9 @@ def records_search():
             "circle": circle_no,
             "district": r["district"] or "",
             "sub_district": r["sub_district"] or "",
+            "village_town": r.get("village_town") or "",
+            "landmark": r.get("landmark") or "",
+            "boundary_description": r.get("boundary_description") or "",
             "area_name": area_name,
             "maps_url": maps_url,
             "status": r["status"]
@@ -351,9 +354,9 @@ def records_search():
 
 @app.route("/api/records/supervisor", methods=["GET"])
 def supervisor_list():
-    """List actual supervisors cross-referenced from functionaries and hlb_allocations."""
+    """List actual supervisors cross-referenced from functionaries, hlb_allocations, and hlb_descriptions."""
     q = request.args.get("q", "").strip()
-    limit = int(request.args.get("limit", 30))
+    limit = int(request.args.get("limit", 50))
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -377,24 +380,53 @@ def supervisor_list():
         """, (r["name"], f"%{r['name']}%"))
         circles = [c["supervisory_circle_no"] for c in cursor.fetchall() if c["supervisory_circle_no"]]
 
+        # Pull all enumerators reporting under this supervisor across all 3 sheets
         cursor.execute("""
-            SELECT COUNT(*) FROM hlb_allocations
-            WHERE supervisor_name = ? OR supervisor_name LIKE ?
+            SELECT h.hlb_no, h.supervisory_circle_no, h.enumerator_name, h.enumerator_user_id, h.allotment_date,
+                   f.mobile_number, f.district, f.sub_district, f.village_town,
+                   d.village_ward_name, d.landmark, d.boundary_description
+            FROM hlb_allocations h
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
+            WHERE h.supervisor_name = ? OR h.supervisor_name LIKE ?
+            ORDER BY cast(h.hlb_no as integer) ASC
         """, (r["name"], f"%{r['name']}%"))
-        hlb_count = cursor.fetchone()[0]
+        assigned_rows = cursor.fetchall()
+
+        assigned_enumerators = []
+        for er_row in assigned_rows:
+            er = dict(er_row)
+            e_area, e_maps = _area_info(er.get("hlb_no"), er.get("supervisory_circle_no"), conn=conn)
+            assigned_enumerators.append({
+                "hlb_no": er.get("hlb_no") or "",
+                "supervisory_circle_no": er.get("supervisory_circle_no") or "",
+                "supervisor_name": er.get("supervisor_name") or "",
+                "enumerator_name": er.get("enumerator_name") or "",
+                "enumerator_user_id": er.get("enumerator_user_id") or "",
+                "mobile": er.get("mobile_number") or "",
+                "village_ward_name": er.get("village_ward_name") or "",
+                "landmark": er.get("landmark") or "",
+                "boundary_description": er.get("boundary_description") or "",
+                "area_name": e_area,
+                "maps_url": e_maps,
+                "allotment_date": er.get("allotment_date") or ""
+            })
 
         area_name, maps_url = _area_info(None, circles[0] if circles else None, conn=conn)
+        r_dict = dict(r)
         supervisors.append({
-            "name": r["name"],
-            "user_id": r["user_id"],
-            "mobile": r["mobile_number"],
+            "name": r_dict.get("name") or "",
+            "user_id": r_dict.get("user_id") or "",
+            "mobile": r_dict.get("mobile_number") or "",
             "circles": circles,
-            "hlb_count": hlb_count,
-            "district": r["district"] or "",
-            "sub_district": r["sub_district"] or "",
+            "hlb_count": len(assigned_enumerators),
+            "district": r_dict.get("district") or "",
+            "sub_district": r_dict.get("sub_district") or "",
+            "village_town": r_dict.get("village_town") or "",
             "area_name": area_name,
             "maps_url": maps_url,
-            "status": r["status"]
+            "enumerators": assigned_enumerators,
+            "status": r_dict.get("status") or "ACTIVE"
         })
 
     conn.close()

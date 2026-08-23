@@ -583,6 +583,7 @@ async function handleSendChat(e) {
 }
 
 function quickAsk(text) {
+  closePdfModal();
   navigateTo("chat");
   const input = document.getElementById("chat-input");
   if (input) {
@@ -669,7 +670,6 @@ function appendChatSkeleton() {
       <span class="w-2 h-2 rounded-full bg-primary animate-bounce"></span>
       <span class="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.2s]"></span>
       <span class="w-2 h-2 rounded-full bg-primary animate-bounce [animation-delay:0.4s]"></span>
-      <span class="text-xs text-on-surface-variant font-medium ml-1">Consulting census records...</span>
     </div>
   `;
   container.appendChild(skel);
@@ -719,6 +719,7 @@ async function fetchRecords(append = false) {
         <div class="loader-spinner-primary"></div>
       </div>
     `;
+    state.recordsCache = {};
   }
 
   try {
@@ -743,35 +744,44 @@ async function fetchRecords(append = false) {
       return;
     }
 
+    state.recordsCache = state.recordsCache || {};
+
     data.results.forEach(rec => {
+      state.recordsCache[rec.user_id] = rec;
       const card = document.createElement("article");
-      card.className = "bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/20 p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:bg-surface-container-low transition-all";
+      card.className = "bg-surface-container-lowest rounded-xl shadow-sm border border-outline-variant/20 p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 hover:bg-surface-container-low transition-all cursor-pointer group";
+      card.onclick = () => openEnumeratorModal(rec.user_id);
       
       const cleanMob = (rec.mobile || "8453441975").replace(/[^0-9]/g, "");
       const waMsg = `Inquiry regarding ${rec.name}${rec.hlb_number ? ` (HLB ${rec.hlb_number})` : ""}`;
-      const mapsLinkHtml = rec.maps_url
-        ? `<a href="${escapeAttr(rec.maps_url)}" target="_blank" rel="noopener noreferrer" class="flex items-center gap-1 text-primary hover:underline"><span class="material-symbols-outlined text-[15px]">map</span> ${escapeHtml(rec.area_name || "View Area")}</a>`
+      const mapsBtnHtml = rec.maps_url
+        ? `<a href="${escapeAttr(rec.maps_url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();"
+             class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-primary/10 text-primary hover:bg-primary hover:text-white transition-colors text-xs font-semibold shrink-0">
+             <span class="material-symbols-outlined text-[16px]">map</span>
+             <span>${escapeHtml(rec.area_name || "View Map")}</span>
+           </a>`
         : "";
 
       card.innerHTML = `
-        <div class="flex-1">
-          <div class="flex items-center gap-2">
-            <h3 class="text-base font-bold text-on-surface">${escapeHtml(rec.name)}</h3>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <h3 class="text-base font-bold text-on-surface group-hover:text-primary transition-colors truncate">${escapeHtml(rec.name)}</h3>
             <span class="text-[10px] px-2 py-0.5 rounded bg-primary-fixed text-primary font-semibold">${escapeHtml(rec.role)}</span>
           </div>
-          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-on-surface-variant mt-1.5">
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">tag</span> HLB: <strong>${escapeHtml(rec.hlb_number || "—")}</strong></span>
-            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">badge</span> ID: <code class="font-mono">${escapeHtml(rec.user_id)}</code></span>
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-on-surface-variant mt-2">
+            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px] text-primary">tag</span> HLB: <strong>${escapeHtml(rec.hlb_number || "—")}</strong></span>
+            <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">badge</span> ID: <code class="font-mono font-bold">${escapeHtml(rec.user_id)}</code></span>
             <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">supervisor_account</span> Supervisor: ${escapeHtml(rec.supervisor || "—")}</span>
             <span class="flex items-center gap-1"><span class="material-symbols-outlined text-[15px]">pin_drop</span> Circle: ${escapeHtml(rec.circle || "—")}</span>
-            ${mapsLinkHtml}
+            ${rec.area_name ? `<span class="flex items-center gap-1 text-primary"><span class="material-symbols-outlined text-[15px]">location_on</span> ${escapeHtml(rec.area_name)}</span>` : ""}
           </div>
         </div>
-        <div class="flex items-center gap-2 w-full md:w-auto justify-end pt-3 md:pt-0 border-t border-outline-variant/20 md:border-t-0">
-          <button onclick="nativeCall('${escapeAttr(cleanMob)}')" class="w-9 h-9 rounded-full bg-surface-container border border-outline-variant/30 flex items-center justify-center text-primary hover:bg-primary hover:text-white transition-colors" title="Call +91 ${escapeHtml(rec.mobile || '8453441975')}">
+        <div class="flex items-center gap-2 w-full md:w-auto justify-end pt-3 md:pt-0 border-t border-outline-variant/20 md:border-t-0 shrink-0">
+          ${mapsBtnHtml}
+          <button onclick="event.stopPropagation(); nativeCall('${escapeAttr(cleanMob)}')" class="w-9 h-9 rounded-full bg-surface-container border border-outline-variant/30 flex items-center justify-center text-primary hover:bg-primary hover:text-white transition-colors" title="Call +91 ${escapeHtml(rec.mobile || '8453441975')}">
             <span class="material-symbols-outlined text-[17px]" style="font-variation-settings:'FILL' 1">call</span>
           </button>
-          <button onclick="nativeWhatsApp('91${escapeAttr(cleanMob)}', '${escapeAttr(waMsg)}')" class="w-9 h-9 rounded-full bg-surface-container border border-outline-variant/30 flex items-center justify-center text-[#25D366] hover:bg-[#25D366] hover:text-white transition-colors" title="Message on WhatsApp">
+          <button onclick="event.stopPropagation(); nativeWhatsApp('91${escapeAttr(cleanMob)}', '${escapeAttr(waMsg)}')" class="w-9 h-9 rounded-full bg-surface-container border border-outline-variant/30 flex items-center justify-center text-[#25D366] hover:bg-[#25D366] hover:text-white transition-colors" title="Message on WhatsApp">
             <svg class="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"></path></svg>
           </button>
           <button onclick="quickAsk('Show details for ${escapeAttr(rec.name)}')" class="w-9 h-9 rounded-full bg-surface-container border border-outline-variant/30 flex items-center justify-center text-primary hover:bg-primary hover:text-white transition-colors" title="Query AI for Details">
@@ -1023,15 +1033,15 @@ async function handleDeleteNotice(id) {
 }
 
 // ==================== 8c. SUPERVISOR LIST ====================
-// Replaces the old single hardcoded "S. A. Ahmed" profile: this fetches
-// the real, searchable list of supervisors (cross-referenced from both
-// the All_Users and HLB Allocation Excel sheets) from /api/records/supervisor.
+// Fetches the real, searchable list of supervisors (cross-referenced from all 3
+// Excel sheets) from /api/records/supervisor with their complete list of assigned enumerators.
 async function loadSupervisors() {
   const container = document.getElementById("supervisors-list");
   if (!container) return;
   const q = (document.getElementById("supervisor-search-input") || {}).value || "";
 
   container.innerHTML = `<div class="flex justify-center p-8"><div class="loader-spinner-primary"></div></div>`;
+  state.supervisorsCache = {};
 
   try {
     const res = await apiFetch(`/api/records/supervisor?q=${encodeURIComponent(q.trim())}`);
@@ -1066,37 +1076,46 @@ async function loadSupervisors() {
       return;
     }
 
+    state.supervisorsCache = state.supervisorsCache || {};
+
     data.supervisors.forEach(sup => {
+      state.supervisorsCache[sup.name] = sup;
       const cleanMob = (sup.mobile || "").replace(/[^0-9]/g, "");
       const initials = sup.name ? sup.name.split(" ").filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase() : "SU";
       const circlesHtml = (sup.circles || []).filter(Boolean).map(c =>
         `<span class="px-2.5 py-1 bg-surface-variant text-on-surface rounded-md text-xs font-semibold border border-outline-variant/40">Circle ${escapeHtml(c)}</span>`
       ).join("") || `<span class="text-xs text-on-surface-variant">No circle on record</span>`;
-      const mapsLinkHtml = sup.maps_url
-        ? `<a href="${escapeAttr(sup.maps_url)}" target="_blank" rel="noopener noreferrer" class="flex-1 border border-primary text-primary bg-surface-container-lowest h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-primary-fixed transition-all active:scale-95">
-             <span class="material-symbols-outlined text-lg">map</span><span>View Jurisdiction Area</span>
-           </a>`
-        : "";
-
+      
       const card = document.createElement("div");
-      card.className = "bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden";
+      card.className = "bg-surface-container-lowest rounded-2xl shadow-sm border border-outline-variant/30 overflow-hidden hover:shadow-md transition-all cursor-pointer group";
+      card.onclick = () => openSupervisorModal(sup.name);
+
       card.innerHTML = `
         <div class="p-5 flex flex-col sm:flex-row sm:items-center gap-4">
           <div class="w-16 h-16 rounded-full bg-primary-container text-white flex items-center justify-center text-xl font-bold shrink-0">${escapeHtml(initials)}</div>
           <div class="flex-1 min-w-0">
-            <h3 class="text-lg font-bold text-on-surface truncate">${escapeHtml(sup.name)}</h3>
+            <div class="flex items-center gap-2">
+              <h3 class="text-lg font-bold text-on-surface group-hover:text-primary transition-colors truncate">${escapeHtml(sup.name)}</h3>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-tertiary-fixed text-tertiary-container font-semibold">Charge Supervisor</span>
+            </div>
             <p class="text-xs text-on-surface-variant mt-0.5">${escapeHtml(sup.mobile || "No mobile on record")} • ID: <code class="font-mono">${escapeHtml(sup.user_id)}</code></p>
-            <p class="text-xs text-on-surface-variant mt-0.5">${sup.hlb_count} HLB${sup.hlb_count === 1 ? "" : "s"} allocated${sup.area_name ? " • " + escapeHtml(sup.area_name) : ""}</p>
+            <p class="text-xs text-on-surface-variant mt-0.5 font-medium">
+              <span class="text-primary font-bold">${sup.hlb_count} Enumerator${sup.hlb_count === 1 ? "" : "s"}</span> Reporting under this Supervisor
+              ${sup.area_name ? " • " + escapeHtml(sup.area_name) : ""}
+            </p>
             <div class="flex flex-wrap gap-1.5 mt-2">${circlesHtml}</div>
           </div>
         </div>
         <div class="px-5 pb-5 flex flex-col sm:flex-row gap-2">
           ${cleanMob ? `
-          <a href="https://wa.me/91${escapeAttr(cleanMob)}?text=${encodeURIComponent('Hello ' + sup.name + ', I am reaching out regarding HLB operations.')}" target="_blank" rel="noopener noreferrer"
-            class="flex-1 bg-primary text-white h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-primary-container transition-all active:scale-95">
-            <span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1;">chat</span><span>Message on WhatsApp</span>
+          <a href="https://wa.me/91${escapeAttr(cleanMob)}?text=${encodeURIComponent('Hello ' + sup.name + ', I am reaching out regarding HLB operations.')}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation();"
+            class="flex-1 bg-[#25D366]/10 text-[#25D366] border border-[#25D366]/30 h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-[#25D366] hover:text-white transition-all active:scale-95">
+            <span class="material-symbols-outlined text-lg">chat</span><span>WhatsApp Supervisor</span>
           </a>` : ""}
-          ${mapsLinkHtml}
+          <button onclick="event.stopPropagation(); openSupervisorModal('${escapeAttr(sup.name)}')"
+            class="flex-1 bg-primary text-white h-11 rounded-full font-semibold text-xs flex items-center justify-center gap-2 hover:bg-primary-container transition-all active:scale-95 shadow-sm">
+            <span class="material-symbols-outlined text-lg">group</span><span>View All Assigned Enumerators (${sup.hlb_count})</span>
+          </button>
         </div>
       `;
       container.appendChild(card);
@@ -1106,8 +1125,85 @@ async function loadSupervisors() {
   }
 }
 
+function openSupervisorModal(supName) {
+  const sup = (state.supervisorsCache || {})[supName];
+  if (!sup) return;
+
+  const modal = document.getElementById("modal-supervisor-profile");
+  if (!modal) return;
+
+  const initials = sup.name ? sup.name.split(" ").filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase() : "SU";
+  document.getElementById("sup-modal-avatar").textContent = initials;
+  document.getElementById("sup-modal-name").textContent = sup.name;
+  document.getElementById("sup-modal-id").textContent = sup.user_id || "N/A";
+  document.getElementById("sup-modal-phone").textContent = sup.mobile ? `+91 ${sup.mobile}` : "No mobile on record";
+
+  const circlesContainer = document.getElementById("sup-modal-circles");
+  if (circlesContainer) {
+    circlesContainer.innerHTML = (sup.circles || []).map(c => 
+      `<span class="px-2 py-0.5 rounded bg-primary text-white text-[11px] font-bold">Circle ${escapeHtml(c)}</span>`
+    ).join("") || `<span class="text-on-surface-variant text-xs">All Lakhipur</span>`;
+  }
+
+  document.getElementById("sup-modal-count").textContent = (sup.enumerators || []).length;
+
+  const tableBody = document.getElementById("sup-modal-enum-table");
+  if (tableBody) {
+    tableBody.innerHTML = "";
+    if (!sup.enumerators || sup.enumerators.length === 0) {
+      tableBody.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-on-surface-variant">No enumerators assigned to this supervisor in records.</td></tr>`;
+    } else {
+      sup.enumerators.forEach(e => {
+        const cleanMob = (e.mobile || "").replace(/[^0-9]/g, "");
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-surface-container-low transition-colors";
+        tr.innerHTML = `
+          <td class="p-2.5 font-mono font-bold text-primary text-[11px]">HLB ${escapeHtml(e.hlb_no)}</td>
+          <td class="p-2.5">
+            <p class="font-bold text-on-surface">${escapeHtml(e.enumerator_name)}</p>
+            <p class="text-[10px] text-on-surface-variant font-mono">${escapeHtml(e.enumerator_user_id)}</p>
+          </td>
+          <td class="p-2.5 text-on-surface-variant whitespace-nowrap">${escapeHtml(e.mobile || "—")}</td>
+          <td class="p-2.5">
+            <p class="font-medium text-on-surface text-[11px]">${escapeHtml(e.village_ward_name || e.area_name || "Lakhipur")}</p>
+            ${e.landmark ? `<p class="text-[10px] text-on-surface-variant">Near: ${escapeHtml(e.landmark)}</p>` : ""}
+          </td>
+          <td class="p-2.5 text-right whitespace-nowrap">
+            <div class="flex items-center justify-end gap-1.5">
+              ${e.maps_url ? `
+                <a href="${escapeAttr(e.maps_url)}" target="_blank" rel="noopener noreferrer" class="w-7 h-7 rounded-full bg-primary/10 text-primary flex items-center justify-center hover:bg-primary hover:text-white transition-colors" title="View Map">
+                  <span class="material-symbols-outlined text-[15px]">map</span>
+                </a>` : ""}
+              ${cleanMob ? `
+                <button onclick="nativeCall('${escapeAttr(cleanMob)}')" class="w-7 h-7 rounded-full bg-surface-container flex items-center justify-center text-primary hover:bg-primary hover:text-white transition-colors" title="Call">
+                  <span class="material-symbols-outlined text-[15px]">call</span>
+                </button>
+                <button onclick="nativeWhatsApp('91${escapeAttr(cleanMob)}', 'Inquiry regarding HLB ${escapeAttr(e.hlb_no)} operations')" class="w-7 h-7 rounded-full bg-[#25D366]/10 text-[#25D366] flex items-center justify-center hover:bg-[#25D366] hover:text-white transition-colors" title="WhatsApp">
+                  <span class="material-symbols-outlined text-[15px]">chat</span>
+                </button>` : ""}
+              <button onclick="closeSupervisorModal(); quickAsk('Show details for ${escapeAttr(e.enumerator_name)}')" class="w-7 h-7 rounded-full bg-primary text-white flex items-center justify-center hover:bg-primary-container transition-colors" title="Ask AI">
+                <span class="material-symbols-outlined text-[14px]">smart_toy</span>
+              </button>
+            </div>
+          </td>
+        `;
+        tableBody.appendChild(tr);
+      });
+    }
+  }
+
+  modal.classList.remove("hidden");
+}
+
+function closeSupervisorModal() {
+  const modal = document.getElementById("modal-supervisor-profile");
+  if (modal) modal.classList.add("hidden");
+}
+
 function debounceSupervisorSearch() {
   clearTimeout(state.searchDebounceTimer);
+  state.searchDebounceTimer = setTimeout(loadSupervisors, 300);
+}
   state.searchDebounceTimer = setTimeout(loadSupervisors, 300);
 }
 

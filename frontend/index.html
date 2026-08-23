@@ -1131,20 +1131,154 @@
     </div>
   </div>
 
-  <!-- PDF Document Preview Modal -->
-  <div id="modal-pdf" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 md:p-6">
-    <div class="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-4xl h-[90vh] flex flex-col overflow-hidden border border-outline-variant/30 animate-fade-in">
-      <div class="p-4 bg-surface flex items-center justify-between border-b border-outline-variant/30">
-        <div class="flex items-center gap-2">
-          <span class="material-symbols-outlined text-error">picture_as_pdf</span>
-          <h3 id="pdf-modal-title" class="text-sm md:text-base font-bold text-on-surface truncate">Census Manual Viewer</h3>
+  <!-- Enumerator Detailed Profile Modal -->
+  <div id="modal-enumerator-profile" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 md:p-6">
+    <div class="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden border border-outline-variant/30 animate-fade-in">
+      <div class="p-5 bg-surface border-b border-outline-variant/20 flex items-start justify-between">
+        <div class="flex items-center gap-3">
+          <div id="enum-modal-avatar" class="w-12 h-12 rounded-full bg-primary text-white flex items-center justify-center text-lg font-bold shrink-0">
+            EN
+          </div>
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <h3 id="enum-modal-name" class="text-base font-bold text-on-surface">Enumerator Name</h3>
+              <span id="enum-modal-role" class="text-[10px] px-2 py-0.5 rounded bg-primary-fixed text-primary font-semibold">Enumerator</span>
+            </div>
+            <p class="text-xs text-on-surface-variant mt-0.5">User ID: <code id="enum-modal-id" class="font-mono font-bold text-primary"></code></p>
+          </div>
         </div>
-        <button onclick="closePdfModal()" class="p-1 rounded-full hover:bg-surface-container text-on-surface-variant">
+        <button onclick="closeEnumeratorModal()" class="p-1 rounded-full hover:bg-surface-container text-on-surface-variant">
           <span class="material-symbols-outlined">close</span>
         </button>
       </div>
-      <div id="pdf-modal-content" class="flex-1 bg-surface-container-low p-4 overflow-y-auto">
-        <!-- PDF Excerpt Viewer / Simulated viewer -->
+
+      <div class="flex-1 p-5 overflow-y-auto space-y-4 text-xs">
+        <!-- Contact & Actions -->
+        <div class="flex flex-wrap gap-2">
+          <button id="enum-modal-call-btn" class="flex-1 bg-surface-container border border-outline-variant/30 text-primary h-10 rounded-xl font-semibold flex items-center justify-center gap-1.5 hover:bg-primary hover:text-white transition-colors">
+            <span class="material-symbols-outlined text-base">call</span>
+            <span id="enum-modal-phone">Call</span>
+          </button>
+          <button id="enum-modal-wa-btn" class="flex-1 bg-[#25D366]/10 text-[#25D366] border border-[#25D366]/30 h-10 rounded-xl font-semibold flex items-center justify-center gap-1.5 hover:bg-[#25D366] hover:text-white transition-colors">
+            <span class="material-symbols-outlined text-base">chat</span>
+            <span>WhatsApp</span>
+          </button>
+        </div>
+
+        <!-- Allocation Information -->
+        <div class="bg-surface rounded-xl p-4 border border-outline-variant/30 space-y-2.5">
+          <h4 class="text-[11px] font-bold text-primary uppercase tracking-wider">Census Allocation Details</h4>
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <span class="text-on-surface-variant block text-[10px]">HLB Number</span>
+              <span id="enum-modal-hlb" class="font-bold text-on-surface text-sm">—</span>
+            </div>
+            <div>
+              <span class="text-on-surface-variant block text-[10px]">Supervisory Circle</span>
+              <span id="enum-modal-circle" class="font-bold text-on-surface">—</span>
+            </div>
+            <div class="col-span-2">
+              <span class="text-on-surface-variant block text-[10px]">Reporting Supervisor</span>
+              <span id="enum-modal-supervisor" class="font-bold text-on-surface">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Location & Landmark Details (from HLB Description.xlsx) -->
+        <div class="bg-surface rounded-xl p-4 border border-outline-variant/30 space-y-2.5">
+          <h4 class="text-[11px] font-bold text-primary uppercase tracking-wider">Jurisdiction & Boundaries</h4>
+          <div class="space-y-2 text-xs">
+            <div>
+              <span class="text-on-surface-variant block text-[10px]">Village / Ward Name</span>
+              <span id="enum-modal-village" class="font-medium text-on-surface">—</span>
+            </div>
+            <div>
+              <span class="text-on-surface-variant block text-[10px]">Prominent Landmark</span>
+              <span id="enum-modal-landmark" class="font-medium text-on-surface">—</span>
+            </div>
+            <div>
+              <span class="text-on-surface-variant block text-[10px]">HLB Boundary Description</span>
+              <p id="enum-modal-boundary" class="text-on-surface-variant leading-relaxed mt-0.5">—</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Map & AI Action Buttons -->
+        <div class="space-y-2 pt-1">
+          <a id="enum-modal-maps-link" href="#" target="_blank" rel="noopener noreferrer"
+            class="w-full bg-primary text-white h-11 rounded-full font-semibold flex items-center justify-center gap-2 hover:bg-primary-container transition-all shadow-sm active:scale-95">
+            <span class="material-symbols-outlined text-lg">map</span>
+            <span>Open Google Maps Jurisdiction</span>
+          </a>
+          <button id="enum-modal-ask-ai-btn" class="w-full bg-surface-container text-on-surface h-10 rounded-full font-semibold flex items-center justify-center gap-2 hover:bg-surface-variant transition-all text-xs">
+            <span class="material-symbols-outlined text-base">smart_toy</span>
+            <span>Ask AI Assistant for Full Profile Details</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Supervisor Detailed Profile Modal (with list of assigned Enumerators) -->
+  <div id="modal-supervisor-profile" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-3 md:p-6">
+    <div class="bg-surface-container-lowest rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col overflow-hidden border border-outline-variant/30 animate-fade-in">
+      <div class="p-5 bg-surface border-b border-outline-variant/20 flex items-start justify-between">
+        <div class="flex items-center gap-3">
+          <div id="sup-modal-avatar" class="w-12 h-12 rounded-full bg-primary-container text-white flex items-center justify-center text-lg font-bold shrink-0">
+            SU
+          </div>
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <h3 id="sup-modal-name" class="text-base font-bold text-on-surface">Supervisor Name</h3>
+              <span class="text-[10px] px-2 py-0.5 rounded bg-tertiary-fixed text-tertiary-container font-semibold">Charge Supervisor</span>
+            </div>
+            <p class="text-xs text-on-surface-variant mt-0.5">
+              ID: <code id="sup-modal-id" class="font-mono font-bold text-primary"></code> •
+              <span id="sup-modal-phone"></span>
+            </p>
+          </div>
+        </div>
+        <button onclick="closeSupervisorModal()" class="p-1 rounded-full hover:bg-surface-container text-on-surface-variant">
+          <span class="material-symbols-outlined">close</span>
+        </button>
+      </div>
+
+      <div class="flex-1 p-5 overflow-y-auto space-y-4 text-xs">
+        <!-- Circle Jurisdiction & Stats -->
+        <div class="flex flex-wrap items-center justify-between gap-3 bg-surface p-4 rounded-xl border border-outline-variant/30">
+          <div>
+            <span class="text-on-surface-variant text-[10px] uppercase tracking-wider block">Supervisory Circles</span>
+            <div id="sup-modal-circles" class="flex flex-wrap gap-1.5 mt-1"></div>
+          </div>
+          <div class="text-right">
+            <span class="text-on-surface-variant text-[10px] uppercase tracking-wider block">Assigned Enumerators</span>
+            <span id="sup-modal-count" class="text-lg font-bold text-primary">0</span>
+          </div>
+        </div>
+
+        <!-- Assigned Enumerators List Table -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="text-xs font-bold text-on-surface uppercase tracking-wider">Enumerators Reporting to this Supervisor</h4>
+            <span class="text-[10px] text-on-surface-variant">Cross-referenced from Census Records</span>
+          </div>
+          <div class="overflow-x-auto border border-outline-variant/20 rounded-xl bg-surface">
+            <table class="w-full text-left text-xs">
+              <thead class="bg-surface-container text-on-surface-variant font-semibold uppercase text-[10px]">
+                <tr>
+                  <th class="p-2.5">HLB</th>
+                  <th class="p-2.5">Enumerator</th>
+                  <th class="p-2.5">Mobile</th>
+                  <th class="p-2.5">Area / Landmark</th>
+                  <th class="p-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="sup-modal-enum-table" class="divide-y divide-outline-variant/20">
+                <!-- Populated dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
   </div>

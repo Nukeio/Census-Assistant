@@ -22,12 +22,7 @@ INTENT_GENERAL = "GENERAL"
 
 CIRCLE_NAME = "Lakhipur Circle"
 
-# Common English filler/question words that carry no search signal on their
-# own. These were previously NOT filtered out of the free-text keyword list,
-# which is exactly why queries like "How to login hlo app" or "Do we use pen
-# or pencil to draw the map" were matching random, unrelated manual chunks —
-# words like "how", "do", "use" are common enough to appear in almost every
-# FAQ page, so an OR-style match against them returns near-arbitrary results.
+# Stopwords & common question boilerplate
 STOPWORDS = {
     "who", "what", "is", "are", "the", "for", "in", "and", "tell", "explain",
     "about", "how", "do", "does", "did", "we", "you", "your", "my", "i",
@@ -36,26 +31,24 @@ STOPWORDS = {
     "when", "where", "why", "which", "or", "but", "so", "can", "could",
     "would", "should", "will", "shall", "get", "got", "need", "want",
     "please", "hello", "hi", "thanks", "thank", "ok", "okay", "yes", "no",
-    "not", "assigned", "show", "details", "census", "find", "search",
+    "not", "assigned", "show", "details", "find", "search", "give", "me",
+    "meaning", "according", "manual", "manuals", "guideline", "guidelines",
+    "instruction", "instructions", "document", "documents", "census"
 }
-# NOTE: "app" and "login" are deliberately NOT in this stopword list — they
-# carry real content meaning (e.g. "How to login hlo app"), so a question
-# using them should still require a real match on them rather than being
-# filtered down to a single vaguer leftover word that then matches an
-# unrelated chunk by coincidence.
 
 def _clean_keywords(query: str) -> List[str]:
-    return [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in STOPWORDS]
+    words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in STOPWORDS]
+    if not words:
+        # If all words were in STOPWORDS (e.g. "Census manual instructions"), retain words >= 3 chars
+        words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3]
+    return words
 
 def _stem(w: str) -> str:
-    """Very small hand-rolled stemmer covering the common English suffix
-    patterns seen in census manual language (duty/duties, definition/defined,
-    allocation/allocated, etc.) — just enough to let a simple substring
-    presence check treat those as the same word without a real NLP stemmer."""
+    """Small suffix stemmer for census terms."""
     wl = w.lower()
     if wl.endswith("ies") and len(wl) > 4:
         return wl[:-3] + "y"
-    for suf in ("ation", "tion", "ment", "ing"):
+    for suf in ("ation", "tion", "ment", "ing", "ers", "er"):
         if wl.endswith(suf) and len(wl) > len(suf) + 2:
             return wl[:-len(suf)]
     if wl.endswith("es") and len(wl) > 4:
@@ -72,14 +65,12 @@ def _hlb_no_norm(hlb_no):
     return str(int(digits)) if digits else None
 
 def _lookup_area_for_hlb(cursor, hlb_no):
-    """Real village/ward name + Google Maps link for an HLB number, from
-    hlb_descriptions (ingested from HLB Description.xlsx). Returns
-    (area_name, maps_url) — both None if not found."""
+    """Lookup village/ward name and landmark from hlb_descriptions."""
     hlb_norm = _hlb_no_norm(hlb_no)
     if not hlb_norm:
         return None, None
     row = cursor.execute(
-        "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
+        "SELECT village_ward_name, landmark, boundary_description FROM hlb_descriptions WHERE hlb_no = ?",
         (hlb_norm,)
     ).fetchone()
     if not row:
@@ -91,8 +82,7 @@ def _lookup_area_for_hlb(cursor, hlb_no):
     return area_name, maps_url
 
 def _lookup_area_for_user(cursor, user_id):
-    """Same as _lookup_area_for_hlb, but starting from a functionary's user_id
-    — looks up their HLB allocation first, then the area for that HLB."""
+    """Lookup area for functionary user ID."""
     if not user_id:
         return None, None
     row = cursor.execute(
@@ -107,13 +97,22 @@ def detect_intent(query: str) -> str:
     """Classify user query intent."""
     q = query.lower()
 
-    # HLB (formerly "EB") or Enumerator / Record lookup. The "eb" alias is
-    # still recognized so old queries/links keep working, but every
-    # response now speaks in HLB terms only. Also explicitly recognizes the
-    # literal phrasing the search result card's ">" (chevron) button sends —
-    # "Show details for <name>" — so opening a profile always resolves to a
-    # person record instead of falling through to a generic manual answer.
-    # Extended to also catch area/village/circle lookups.
+    # Manual, Guidelines, Procedures, Definitions
+    manual_triggers = [
+        "manual", "guideline", "guidelines", "rule", "rules", "procedure",
+        "duty", "duties", "role", "definition", "define", "criteria",
+        "household", "building", "census house", "how to", "faq", "numbering",
+        "form 4b", "form 4", "form", "eligibility", "eligible", "draw",
+        "layout", "map", "pencil", "pen", "notional map", "hlo", "app",
+        "mobile app", "sync", "charge", "supervisor duty", "supervisor duties",
+        "enumerator duty", "enumerator duties", "what is", "how do", "steps"
+    ]
+    if any(trig in q for trig in manual_triggers):
+        # If it specifically queries a concrete person/EB, prioritize record
+        if not re.search(r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|who is assigned to)\b', q):
+            return INTENT_MANUAL_SEARCH
+
+    # HLB or Enumerator / Record lookup
     if re.search(
         r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|'
         r'who is in charge|show details for|details for|profile of|'
@@ -122,24 +121,14 @@ def detect_intent(query: str) -> str:
     ):
         return INTENT_RECORD_SEARCH
 
-    # Supervisor specific query. Note: "S. A. Ahmed" is NOT a supervisor —
-    # he is one of the two Technical Assistants — so his name is
-    # deliberately excluded from this trigger.
-    if re.search(r'\b(supervisor|zonal supervisor|circle supervisor|supervisory circle)\b', q) and not re.search(r'\b(duty|duties|role|guideline|manual|rule)\b', q):
+    # Supervisor specific query
+    if re.search(r'\b(supervisor|zonal supervisor|circle supervisor)\b', q) and not any(w in q for w in ["duty", "duties", "role", "manual", "rule", "guideline"]):
         return INTENT_SUPERVISOR_QUERY
-
-    # Manual, Guidelines, Procedures, Definitions
-    if re.search(r'\b(manual|guideline|rule|procedure|duty|duties|definition|criteria|form\s*\d+[a-z]?|household|building|census house|how to|faq)\b', q):
-        return INTENT_MANUAL_SEARCH
 
     return INTENT_GENERAL
 
 def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """
-    Search hlb_descriptions for village/ward/area name matches, then look up
-    the enumerator assigned to each matching HLB. Returns functionary-style
-    result dicts so they can be merged with the main record_results list.
-    """
+    """Search hlb_descriptions for village/ward/area name matches."""
     clean_words = _clean_keywords(query)
     if not clean_words:
         return []
@@ -148,7 +137,6 @@ def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     cursor = conn.cursor()
     results = []
 
-    # Search for area/village names matching any keyword
     for word in clean_words[:3]:
         rows = cursor.execute("""
             SELECT hlb_no, village_ward_name, landmark, boundary_description
@@ -161,7 +149,6 @@ def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             hlb_norm = desc_row["hlb_no"]
             area_name = desc_row["landmark"] or re.sub(r'\s*\(\d+\)\s*$', '', desc_row["village_ward_name"] or "").strip()
 
-            # Find the enumerator assigned to this HLB
             alloc_row = cursor.execute("""
                 SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district
                 FROM hlb_allocations h
@@ -183,6 +170,8 @@ def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                     "mobile": alloc_row.get("enum_mobile") or "+91 84534 41975",
                     "district": alloc_row.get("district") or "Goalpara",
                     "area_name": area_name,
+                    "landmark": desc_row["landmark"],
+                    "boundary_description": desc_row["boundary_description"],
                     "maps_url": maps_url,
                     "confidence": "high",
                     "source": "Census Record DB - 2024 (HLB Description)"
@@ -197,39 +186,27 @@ def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     return results
 
 def search_structured_records(query: str, limit: int = 5, strict: bool = False) -> List[Dict[str, Any]]:
-    """
-    Search functionaries and HLB allocations for matching records.
-
-    `strict=True` is used for queries that only weakly imply a record lookup
-    (GENERAL intent — no HLB/enumerator/supervisor keyword at all). In that
-    mode, the free-text name search below requires ALL of the query's
-    keywords to match (AND, not OR) and skips the LIKE fallback — a loose
-    single-word OR/LIKE match was the cause of unrelated general questions
-    (e.g. "do we use pen or pencil to draw the map") spuriously matching a
-    person via a stray prefix hit (e.g. on a village name) and being shown
-    as a "Functionary Record Found" instead of being treated as a general
-    question. The precise HLB-number lookup below is unaffected by `strict`
-    since a literal HLB/EB/block number is never a false signal.
-    """
+    """Search functionaries and HLB allocations for matching records."""
     conn = get_db_connection()
     cursor = conn.cursor()
     results = []
 
-    # 1. Check for HLB number (accepts the legacy "eb"/"block" wording too)
+    # 1. Check for HLB number
     eb_match = re.search(r'\b(?:eb|hlb|block)\s*#?\s*0*(\d+)\b', query, re.IGNORECASE)
     if eb_match:
         eb_num = eb_match.group(1)
-        # Pad to 4 digits (e.g. '0012') or search exact/like
         padded_eb = eb_num.zfill(4)
         cursor.execute("""
-            SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district
+            SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district, d.village_ward_name, d.landmark, d.boundary_description
             FROM hlb_allocations h
             LEFT JOIN functionaries f ON (h.enumerator_user_id = f.user_id OR h.enumerator_name = f.name)
+            LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
             WHERE h.hlb_no = ? OR h.hlb_no LIKE ? OR h.supervisory_circle_no = ?
             LIMIT ?
         """, (padded_eb, f"%{eb_num}", eb_num.zfill(3), limit))
         for row in cursor.fetchall():
-            area_name, maps_url = _lookup_area_for_hlb(cursor, row["hlb_no"])
+            area_name = row["landmark"] or (re.sub(r'\s*\(\d+\)\s*$', '', row["village_ward_name"] or '').strip()) if row["village_ward_name"] else None
+            maps_url = ("https://www.google.com/maps/search/?api=1&query=" + url_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
             results.append({
                 "type": "hlb_allocation",
                 "hlb_no": row["hlb_no"],
@@ -241,26 +218,30 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                 "mobile": row["enum_mobile"] or "+91 84534 41975",
                 "district": row["district"] or "Goalpara",
                 "area_name": area_name,
+                "landmark": row["landmark"],
+                "boundary_description": row["boundary_description"],
                 "maps_url": maps_url,
                 "confidence": "high",
                 "source": "Census Record DB - 2024 (HLB Allocation)"
             })
 
-    # 2. Check for supervisory circle number (e.g. "Circle 3" or "Circle No. 2")
+    # 2. Check for supervisory circle number
     circle_match = re.search(r'\b(?:circle|supervisory circle|circle no\.?)\s*#?\s*(\d+)\b', query, re.IGNORECASE)
     if circle_match and not eb_match:
         circle_num = circle_match.group(1)
         cursor.execute("""
-            SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district
+            SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district, d.village_ward_name, d.landmark, d.boundary_description
             FROM hlb_allocations h
             LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
             WHERE h.supervisory_circle_no = ? OR h.supervisory_circle_no = ?
             LIMIT ?
         """, (circle_num, circle_num.zfill(2), limit))
         for row in cursor.fetchall():
             if any(r.get("hlb_no") == row["hlb_no"] for r in results):
                 continue
-            area_name, maps_url = _lookup_area_for_hlb(cursor, row["hlb_no"])
+            area_name = row["landmark"] or (re.sub(r'\s*\(\d+\)\s*$', '', row["village_ward_name"] or '').strip()) if row["village_ward_name"] else None
+            maps_url = ("https://www.google.com/maps/search/?api=1&query=" + url_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
             results.append({
                 "type": "hlb_allocation",
                 "hlb_no": row["hlb_no"],
@@ -272,27 +253,14 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                 "mobile": row.get("enum_mobile") or "+91 84534 41975",
                 "district": row.get("district") or "Goalpara",
                 "area_name": area_name,
+                "landmark": row["landmark"],
+                "boundary_description": row["boundary_description"],
                 "maps_url": maps_url,
                 "confidence": "high",
                 "source": "Census Record DB - 2024 (HLB Allocation)"
             })
 
-    # 3. Check for Name or Mobile or User ID in functionaries.
-    #
-    # Precision strategy (this replaced a much weaker OR-only match that was
-    # returning the WRONG person for multi-word name queries — e.g. "Show
-    # details for Abu Daium Ahmed" was returning a completely different
-    # "Abu Sayed Ali Sheikh" record, because the old query OR'd every word
-    # together ("Abu"* OR "Daium"* OR "Ahmed"*) with no result ranking, so it
-    # just returned whichever "Abu ..." row SQLite happened to return first):
-    #   1. Try an AND match (every keyword must be present on the SAME row) —
-    #      high confidence, since a multi-word match is very unlikely to be
-    #      the wrong person.
-    #   2. Only if that finds nothing, fall back to OR (then LIKE) — but mark
-    #      these as low confidence, since a single-keyword match is inherently
-    #      ambiguous (there can be many "Abu ..." or many "Ahmed ..." people).
-    #      `strict` mode (weak GENERAL-intent queries) skips this fallback
-    #      entirely rather than accept a low-confidence guess.
+    # 3. Person Name lookup
     clean_words = _clean_keywords(query)
 
     def _add_functionary_row(row, confidence):
@@ -307,6 +275,7 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
             "mobile_number": row["mobile_number"],
             "district": row["district"],
             "sub_district": row["sub_district"],
+            "village_town": row["village_town"],
             "status": row["status"],
             "area_name": area_name,
             "maps_url": maps_url,
@@ -314,7 +283,7 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
             "source": "Census Record DB - 2024 (All Users)"
         })
 
-    if clean_words:
+    if clean_words and not eb_match:
         and_rows = []
         if len(clean_words) >= 2:
             fts_query = " AND ".join([f'"{w}"*' for w in clean_words])
@@ -357,111 +326,101 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                     """, (f"%{word}%", f"%{word}%", f"%{word}%", limit))
                     for row in cursor.fetchall():
                         _add_functionary_row(row, "low")
-        # strict mode: no OR / LIKE fallback — a weak, single-signal match is
-        # exactly what produced false positives on unrelated general questions.
 
     conn.close()
     return results
 
-def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
+def search_manual_chunks(query: str, limit: int = 4) -> List[Dict[str, Any]]:
     """
-    Retrieve relevant excerpts from PDF manuals and FAQ.
-
-    Rather than trusting FTS5's boolean MATCH/rank alone (an OR-style match
-    was returning essentially arbitrary, unrelated chunks whenever the query
-    contained any common word — "How to login hlo app" and "Do we use pen or
-    pencil to draw the map" both matched totally unrelated FAQ entries this
-    way), this pulls a candidate pool from FTS and then scores each candidate
-    in Python by how many of the query's actual keywords it contains. Only
-    candidates clearing a "most keywords present" bar are returned; if none
-    clear it, this returns empty so the caller gives an honest "I don't have
-    that information" instead of a confidently wrong answer.
+    Retrieve relevant excerpts from PDF manuals and FAQ using FTS5 rank ordering.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
 
     clean_words = _clean_keywords(query)
     if not clean_words:
+        # Fallback to general term extraction
+        clean_words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3]
+
+    if not clean_words:
         conn.close()
         return []
 
-    def _term_clause(w):
-        if len(w) > 8:
-            return f'("{w}"* OR "{w[:5]}"*)'
-        return f'"{w}"*'
-
     candidates = {}
 
-    if len(clean_words) > 1:
-        and_query = " AND ".join(_term_clause(w) for w in clean_words)
-        try:
-            cursor.execute("""
-                SELECT m.* FROM manual_chunks m
-                JOIN manual_chunks_fts fts ON m.id = fts.rowid
-                WHERE manual_chunks_fts MATCH ?
-                LIMIT ?
-            """, (and_query, limit * 4))
-            for row in cursor.fetchall():
-                candidates[row["id"]] = row
-        except Exception as e:
-            logger.debug(f"Manual FTS AND query error: {e}")
-
-    # Also pull a broader OR-based recall pool for scoring — a real match can
-    # still score well even if the strict AND clause above missed it (e.g.
-    # tokenization quirks), but every candidate here still has to clear the
-    # keyword-overlap bar below before it's actually returned.
-    or_query = " OR ".join(f'"{w}"*' for w in clean_words)
+    # 1. Try phrase matching or FTS AND matching
+    and_query = " AND ".join([f'"{w}"*' for w in clean_words])
     try:
         cursor.execute("""
             SELECT m.* FROM manual_chunks m
             JOIN manual_chunks_fts fts ON m.id = fts.rowid
             WHERE manual_chunks_fts MATCH ?
+            ORDER BY rank
             LIMIT ?
-        """, (or_query, max(limit * 8, 30)))
+        """, (and_query, limit * 2))
+        for row in cursor.fetchall():
+            candidates[row["id"]] = row
+    except Exception as e:
+        logger.debug(f"Manual FTS AND query error: {e}")
+
+    # 2. Try FTS OR query for ranking
+    or_query = " OR ".join([f'"{w}"*' for w in clean_words])
+    try:
+        cursor.execute("""
+            SELECT m.* FROM manual_chunks m
+            JOIN manual_chunks_fts fts ON m.id = fts.rowid
+            WHERE manual_chunks_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+        """, (or_query, limit * 4))
         for row in cursor.fetchall():
             candidates.setdefault(row["id"], row)
     except Exception as e:
         logger.debug(f"Manual FTS OR query error: {e}")
 
+    # 3. Fallback LIKE search if FTS yielded no results
     if not candidates:
         for word in clean_words[:3]:
             cursor.execute("""
                 SELECT * FROM manual_chunks
                 WHERE chunk_text LIKE ? OR section_header LIKE ?
-                LIMIT 20
-            """, (f"%{word}%", f"%{word}%"))
+                LIMIT ?
+            """, (f"%{word}%", f"%{word}%", limit * 2))
             for row in cursor.fetchall():
                 candidates.setdefault(row["id"], row)
 
-    def _word_present(w, text_lower):
-        wl = w.lower()
-        if wl in text_lower:
-            return True
-        stem = _stem(w)
-        if stem and stem in text_lower:
-            return True
-        if len(w) > 8 and w[:5].lower() in text_lower:
-            return True
-        return False
-
-    scored = []
-    for row in candidates.values():
+    def _score_chunk(row):
         text_lower = ((row["chunk_text"] or "") + " " + (row["section_header"] or "")).lower()
-        score = sum(1 for w in clean_words if _word_present(w, text_lower))
-        if score > 0:
-            scored.append((score, row))
+        score = 0
+        matched_words = 0
+        for w in clean_words:
+            wl = w.lower()
+            if re.search(r'\b' + re.escape(wl) + r'\b', text_lower):
+                score += 3
+                matched_words += 1
+            else:
+                stem = _stem(w)
+                if stem and len(stem) >= 3 and re.search(r'\b' + re.escape(stem) + r'\w*\b', text_lower):
+                    score += 2
+                    matched_words += 1
+        # Bonus for section header matches
+        if row["section_header"]:
+            header_lower = row["section_header"].lower()
+            if any(re.search(r'\b' + re.escape(w.lower()) + r'\b', header_lower) for w in clean_words):
+                score += 4
 
-    # Require MOST of the query's keywords to actually be present in the
-    # chunk — this is what keeps an unrelated question (where every real
-    # chunk scores 0 or 1 out of 4-5 keywords) from returning anything at all.
-    if len(clean_words) == 1:
-        required = 1
-    elif len(clean_words) == 2:
-        required = 2
-    else:
-        required = max(2, round(len(clean_words) * 0.6))
+        # Discard if zero valid words matched
+        if matched_words == 0:
+            return 0
+        # If query has multiple clean keywords, require at least 35% overlap
+        if len(clean_words) >= 3 and (matched_words / len(clean_words)) < 0.35:
+            return 0
 
-    scored = [t for t in scored if t[0] >= required]
+        return score
+
+    scored = [( _score_chunk(row), row ) for row in candidates.values()]
+    # Keep chunks that have a positive score
+    scored = [t for t in scored if t[0] >= 2]
     scored.sort(key=lambda t: -t[0])
 
     results = []
@@ -484,22 +443,18 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
     record_results = []
     manual_results = []
 
+    # Always search structured records if relevant
     if intent in [INTENT_RECORD_SEARCH, INTENT_SUPERVISOR_QUERY, INTENT_GENERAL]:
-        # GENERAL means the query had no HLB/enumerator/supervisor keyword at
-        # all — it's a weak signal for a record lookup (e.g. someone just
-        # typed a plain name with no other context), so search strictly to
-        # avoid a random word in the question spuriously matching a person.
         record_results = search_structured_records(query, limit=5, strict=(intent == INTENT_GENERAL))
-
-        # For RECORD_SEARCH with area/village keywords but no results yet,
-        # also try the area-based search against hlb_descriptions.
         if intent == INTENT_RECORD_SEARCH and not record_results:
-            area_keywords = ["area", "village", "ward", "locality", "circle"]
-            if any(kw in query.lower() for kw in area_keywords):
-                record_results = search_by_area(query, limit=5)
+            record_results = search_by_area(query, limit=5)
 
-    if intent in [INTENT_MANUAL_SEARCH, INTENT_GENERAL] or not record_results:
-        manual_results = search_manual_chunks(query, limit=3)
+    # Always search manual guidelines if manual intent OR if no records OR if query is instructional
+    manual_keywords = ["how", "what", "rule", "procedure", "definition", "define", "meaning", "duty", "duties", "building", "house", "household", "form", "app", "map", "pencil", "pen", "eligible", "sync"]
+    is_instructional = any(k in query.lower() for k in manual_keywords)
+
+    if intent == INTENT_MANUAL_SEARCH or not record_results or is_instructional:
+        manual_results = search_manual_chunks(query, limit=4)
 
     # Compile context strings
     context_parts = []
@@ -510,10 +465,11 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         for idx, rec in enumerate(record_results, 1):
             if rec.get("type") == "hlb_allocation":
                 area_bit = f" | Area/Village: {rec['area_name']}" if rec.get("area_name") else ""
+                landmark_bit = f" | Landmark: {rec['landmark']}" if rec.get("landmark") else ""
                 context_parts.append(
                     f"{idx}. HLB Number: {rec['hlb_no']} | Circle: {rec['circle_no']} | "
                     f"Enumerator: {rec['enumerator_name']} (ID: {rec['enumerator_user_id']}) | "
-                    f"Supervisor: {rec['supervisor_name']} | Allotment Date: {rec['allotment_date']}{area_bit}"
+                    f"Supervisor: {rec['supervisor_name']} | Allotment Date: {rec['allotment_date']}{area_bit}{landmark_bit}"
                 )
                 citations.append(rec['source'])
             else:
@@ -536,10 +492,6 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
             )
             citations.append(doc['source'])
 
-    # Standard technical assistant contact block. Both Technical Assistants
-    # are listed here — neither of them is a supervisor; real supervisor
-    # names come only from the matched HLB allocation / functionary
-    # records above.
     ta_lines = "\n".join(
         f"Technical Assistant: {ta['name']} ({ta['phone']}, WhatsApp: {ta['whatsapp_link']})"
         for ta in TECHNICAL_ASSISTANTS

@@ -1204,8 +1204,6 @@ function debounceSupervisorSearch() {
   clearTimeout(state.searchDebounceTimer);
   state.searchDebounceTimer = setTimeout(loadSupervisors, 300);
 }
-  state.searchDebounceTimer = setTimeout(loadSupervisors, 300);
-}
 
 // ==================== 9. ADMIN PANEL & FILE UPLOADERS ====================
 async function loadAdminStats() {

@@ -235,13 +235,31 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     if records and intent in ("RECORD_SEARCH", "GENERAL"):
         rec = records[0]
         if rec.get("type") == "functionary":
+            # rag_engine now tags every functionary match with a confidence:
+            # "high" means every significant word in the query matched this
+            # exact record (safe to state as fact); "low" means only a
+            # fallback single-keyword match was found (e.g. the name wasn't
+            # an exact match) — that's still useful, but it should say so
+            # instead of asserting it as confidently as an exact match, which
+            # is what caused the wrong-person mix-ups reported earlier.
+            is_low_confidence = rec.get("confidence") == "low"
+            title = (
+                "**Closest Match Found** (not an exact match for your search — "
+                "please verify the name/ID below):"
+                if is_low_confidence else
+                "**Functionary Record Found:**"
+            )
+            area_line = f"• **Area/Village:** {rec['area_name']}\n" if rec.get("area_name") else ""
+            maps_line = f"• **Google Maps:** {rec['maps_url']}\n" if rec.get("maps_url") else ""
             return (
-                f"**Functionary Record Found:**\n\n"
+                f"{title}\n\n"
                 f"• **Name:** {rec['name']}\n"
                 f"• **User ID:** `{rec['user_id']}`\n"
                 f"• **Designation:** {rec['functionary_type']}\n"
                 f"• **Mobile:** {rec['mobile_number']}\n"
                 f"• **Jurisdiction:** {rec['sub_district']}, {rec['district']}\n"
+                f"{area_line}"
+                f"{maps_line}"
                 f"• **Status:** {rec['status']}\n\n"
                 f"📌 *Source: {rec['source']}*"
             )

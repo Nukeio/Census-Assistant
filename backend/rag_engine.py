@@ -6,6 +6,7 @@ Handles Intent Detection, Structured Entity Search, PDF Manual Semantic Retrieva
 import re
 import json
 import logging
+from urllib.parse import quote as url_quote
 from typing import Dict, Any, List, Optional
 from .database import get_db_connection
 from .messaging_gateway import TECHNICAL_ASSISTANTS
@@ -18,6 +19,89 @@ INTENT_RECORD_SEARCH = "RECORD_SEARCH"
 INTENT_MANUAL_SEARCH = "MANUAL_SEARCH"
 INTENT_SUPERVISOR_QUERY = "SUPERVISOR_QUERY"
 INTENT_GENERAL = "GENERAL"
+
+CIRCLE_NAME = "Lakhipur Circle"
+
+# Common English filler/question words that carry no search signal on their
+# own. These were previously NOT filtered out of the free-text keyword list,
+# which is exactly why queries like "How to login hlo app" or "Do we use pen
+# or pencil to draw the map" were matching random, unrelated manual chunks —
+# words like "how", "do", "use" are common enough to appear in almost every
+# FAQ page, so an OR-style match against them returns near-arbitrary results.
+STOPWORDS = {
+    "who", "what", "is", "are", "the", "for", "in", "and", "tell", "explain",
+    "about", "how", "do", "does", "did", "we", "you", "your", "my", "i",
+    "use", "used", "using", "to", "of", "a", "an", "this", "that", "these",
+    "those", "with", "from", "by", "on", "at", "as", "it", "its", "if",
+    "when", "where", "why", "which", "or", "but", "so", "can", "could",
+    "would", "should", "will", "shall", "get", "got", "need", "want",
+    "please", "hello", "hi", "thanks", "thank", "ok", "okay", "yes", "no",
+    "not", "assigned", "show", "details", "census", "find", "search",
+}
+# NOTE: "app" and "login" are deliberately NOT in this stopword list — they
+# carry real content meaning (e.g. "How to login hlo app"), so a question
+# using them should still require a real match on them rather than being
+# filtered down to a single vaguer leftover word that then matches an
+# unrelated chunk by coincidence.
+
+def _clean_keywords(query: str) -> List[str]:
+    return [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in STOPWORDS]
+
+def _stem(w: str) -> str:
+    """Very small hand-rolled stemmer covering the common English suffix
+    patterns seen in census manual language (duty/duties, definition/defined,
+    allocation/allocated, etc.) — just enough to let a simple substring
+    presence check treat those as the same word without a real NLP stemmer."""
+    wl = w.lower()
+    if wl.endswith("ies") and len(wl) > 4:
+        return wl[:-3] + "y"
+    for suf in ("ation", "tion", "ment", "ing"):
+        if wl.endswith(suf) and len(wl) > len(suf) + 2:
+            return wl[:-len(suf)]
+    if wl.endswith("es") and len(wl) > 4:
+        return wl[:-2]
+    for suf in ("ed", "s"):
+        if wl.endswith(suf) and len(wl) > 3:
+            return wl[:-len(suf)]
+    return wl
+
+def _hlb_no_norm(hlb_no):
+    if hlb_no is None:
+        return None
+    digits = re.sub(r'\D', '', str(hlb_no))
+    return str(int(digits)) if digits else None
+
+def _lookup_area_for_hlb(cursor, hlb_no):
+    """Real village/ward name + Google Maps link for an HLB number, from
+    hlb_descriptions (ingested from HLB Description.xlsx). Returns
+    (area_name, maps_url) — both None if not found."""
+    hlb_norm = _hlb_no_norm(hlb_no)
+    if not hlb_norm:
+        return None, None
+    row = cursor.execute(
+        "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
+        (hlb_norm,)
+    ).fetchone()
+    if not row:
+        return None, None
+    area_name = row["landmark"] or re.sub(r'\s*\(\d+\)\s*$', '', row["village_ward_name"] or "").strip() or None
+    if not area_name:
+        return None, None
+    maps_url = "https://www.google.com/maps/search/?api=1&query=" + url_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")
+    return area_name, maps_url
+
+def _lookup_area_for_user(cursor, user_id):
+    """Same as _lookup_area_for_hlb, but starting from a functionary's user_id
+    — looks up their HLB allocation first, then the area for that HLB."""
+    if not user_id:
+        return None, None
+    row = cursor.execute(
+        "SELECT hlb_no FROM hlb_allocations WHERE enumerator_user_id = ? LIMIT 1",
+        (user_id,)
+    ).fetchone()
+    if not row:
+        return None, None
+    return _lookup_area_for_hlb(cursor, row["hlb_no"])
 
 def detect_intent(query: str) -> str:
     """Classify user query intent."""
@@ -77,23 +161,7 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
             LIMIT ?
         """, (padded_eb, f"%{eb_num}", eb_num.zfill(3), limit))
         for row in cursor.fetchall():
-            # Look up the real village/ward name for this HLB from
-            # hlb_descriptions (normalize the number the same way
-            # ingest_hlb_description() does, so '0012' and '12' both match).
-            village_name = None
-            digits = re.sub(r'\D', '', row["hlb_no"] or "")
-            hlb_norm = str(int(digits)) if digits else None
-            if hlb_norm:
-                desc_row = cursor.execute(
-                    "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
-                    (hlb_norm,)
-                ).fetchone()
-                if desc_row:
-                    # Prefer "landmark" — same name without the redundant
-                    # trailing "(0001)"-style HLB code.
-                    village_name = desc_row["landmark"] or (
-                        re.sub(r'\s*\(\d+\)\s*$', '', desc_row["village_ward_name"] or "").strip() or None
-                    )
+            area_name, maps_url = _lookup_area_for_hlb(cursor, row["hlb_no"])
             results.append({
                 "type": "hlb_allocation",
                 "hlb_no": row["hlb_no"],
@@ -104,17 +172,51 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                 "allotment_date": row["allotment_date"],
                 "mobile": row["enum_mobile"] or "+91 84534 41975",
                 "district": row["district"] or "Goalpara",
-                "area_name": village_name,
+                "area_name": area_name,
+                "maps_url": maps_url,
+                "confidence": "high",
                 "source": "Census Record DB - 2024 (HLB Allocation)"
             })
 
-    # 2. Check for Name or Mobile or User ID in functionaries
-    clean_words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in ["who", "what", "is", "assigned", "to", "the", "for", "show", "details", "census", "find", "search"]]
+    # 2. Check for Name or Mobile or User ID in functionaries.
+    #
+    # Precision strategy (this replaced a much weaker OR-only match that was
+    # returning the WRONG person for multi-word name queries — e.g. "Show
+    # details for Abu Daium Ahmed" was returning a completely different
+    # "Abu Sayed Ali Sheikh" record, because the old query OR'd every word
+    # together ("Abu"* OR "Daium"* OR "Ahmed"*) with no result ranking, so it
+    # just returned whichever "Abu ..." row SQLite happened to return first):
+    #   1. Try an AND match (every keyword must be present on the SAME row) —
+    #      high confidence, since a multi-word match is very unlikely to be
+    #      the wrong person.
+    #   2. Only if that finds nothing, fall back to OR (then LIKE) — but mark
+    #      these as low confidence, since a single-keyword match is inherently
+    #      ambiguous (there can be many "Abu ..." or many "Ahmed ..." people).
+    #      `strict` mode (weak GENERAL-intent queries) skips this fallback
+    #      entirely rather than accept a low-confidence guess.
+    clean_words = _clean_keywords(query)
 
-    if strict:
-        # Require ALL keywords to match (AND), and only when there are at
-        # least two of them — a single generic English word is far too easy
-        # to spuriously prefix-match against a name/village field.
+    def _add_functionary_row(row, confidence):
+        if any(r.get("user_id") == row["user_id"] for r in results):
+            return
+        area_name, maps_url = _lookup_area_for_user(cursor, row["user_id"])
+        results.append({
+            "type": "functionary",
+            "user_id": row["user_id"],
+            "name": row["name"],
+            "functionary_type": row["functionary_type"],
+            "mobile_number": row["mobile_number"],
+            "district": row["district"],
+            "sub_district": row["sub_district"],
+            "status": row["status"],
+            "area_name": area_name,
+            "maps_url": maps_url,
+            "confidence": confidence,
+            "source": "Census Record DB - 2024 (All Users)"
+        })
+
+    if clean_words:
+        and_rows = []
         if len(clean_words) >= 2:
             fts_query = " AND ".join([f'"{w}"*' for w in clean_words])
             try:
@@ -122,131 +224,149 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                     SELECT f.* FROM functionaries f
                     JOIN functionaries_fts fts ON f.id = fts.rowid
                     WHERE functionaries_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (fts_query, limit))
+                and_rows = cursor.fetchall()
+            except Exception as e:
+                logger.debug(f"FTS functionaries AND query error: {e}")
+
+        for row in and_rows:
+            _add_functionary_row(row, "high")
+
+        if not results and not strict:
+            fts_query = " OR ".join([f'"{w}"*' for w in clean_words])
+            try:
+                cursor.execute("""
+                    SELECT f.* FROM functionaries f
+                    JOIN functionaries_fts fts ON f.id = fts.rowid
+                    WHERE functionaries_fts MATCH ?
+                    ORDER BY rank
                     LIMIT ?
                 """, (fts_query, limit))
                 for row in cursor.fetchall():
-                    if not any(r.get("user_id") == row["user_id"] for r in results):
-                        results.append({
-                            "type": "functionary",
-                            "user_id": row["user_id"],
-                            "name": row["name"],
-                            "functionary_type": row["functionary_type"],
-                            "mobile_number": row["mobile_number"],
-                            "district": row["district"],
-                            "sub_district": row["sub_district"],
-                            "status": row["status"],
-                            "source": "Census Record DB - 2024 (All Users)"
-                        })
+                    _add_functionary_row(row, "low")
             except Exception as e:
-                logger.debug(f"FTS functionaries strict query error: {e}")
-        # No OR / LIKE fallback in strict mode — a weak, single-signal match
-        # is exactly what produced false positives on unrelated questions.
-    elif clean_words:
-        fts_query = " OR ".join([f'"{w}"*' for w in clean_words])
-        try:
-            cursor.execute("""
-                SELECT f.* FROM functionaries f
-                JOIN functionaries_fts fts ON f.id = fts.rowid
-                WHERE functionaries_fts MATCH ?
-                LIMIT ?
-            """, (fts_query, limit))
-            for row in cursor.fetchall():
-                # Avoid duplicates
-                if not any(r.get("user_id") == row["user_id"] for r in results):
-                    results.append({
-                        "type": "functionary",
-                        "user_id": row["user_id"],
-                        "name": row["name"],
-                        "functionary_type": row["functionary_type"],
-                        "mobile_number": row["mobile_number"],
-                        "district": row["district"],
-                        "sub_district": row["sub_district"],
-                        "status": row["status"],
-                        "source": "Census Record DB - 2024 (All Users)"
-                    })
-        except Exception as e:
-            logger.debug(f"FTS functionaries query error: {e}")
+                logger.debug(f"FTS functionaries OR query error: {e}")
 
-        # Fallback to direct LIKE query if FTS gave no results
-        if not results:
-            for word in clean_words[:2]:
-                cursor.execute("""
-                    SELECT * FROM functionaries
-                    WHERE name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?
-                    LIMIT ?
-                """, (f"%{word}%", f"%{word}%", f"%{word}%", limit))
-                for row in cursor.fetchall():
-                    if not any(r.get("user_id") == row["user_id"] for r in results):
-                        results.append({
-                            "type": "functionary",
-                            "user_id": row["user_id"],
-                            "name": row["name"],
-                            "functionary_type": row["functionary_type"],
-                            "mobile_number": row["mobile_number"],
-                            "district": row["district"],
-                            "sub_district": row["sub_district"],
-                            "status": row["status"],
-                            "source": "Census Record DB - 2024 (All Users)"
-                        })
+            if not results:
+                for word in clean_words[:2]:
+                    cursor.execute("""
+                        SELECT * FROM functionaries
+                        WHERE name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?
+                        LIMIT ?
+                    """, (f"%{word}%", f"%{word}%", f"%{word}%", limit))
+                    for row in cursor.fetchall():
+                        _add_functionary_row(row, "low")
+        # strict mode: no OR / LIKE fallback — a weak, single-signal match is
+        # exactly what produced false positives on unrelated general questions.
 
     conn.close()
     return results
 
 def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
-    """Retrieve relevant excerpts from PDF manuals and FAQ using FTS ranking."""
+    """
+    Retrieve relevant excerpts from PDF manuals and FAQ.
+
+    Rather than trusting FTS5's boolean MATCH/rank alone (an OR-style match
+    was returning essentially arbitrary, unrelated chunks whenever the query
+    contained any common word — "How to login hlo app" and "Do we use pen or
+    pencil to draw the map" both matched totally unrelated FAQ entries this
+    way), this pulls a candidate pool from FTS and then scores each candidate
+    in Python by how many of the query's actual keywords it contains. Only
+    candidates clearing a "most keywords present" bar are returned; if none
+    clear it, this returns empty so the caller gives an honest "I don't have
+    that information" instead of a confidently wrong answer.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
-    results = []
 
-    clean_words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in ["who", "what", "is", "are", "the", "for", "in", "and", "tell", "explain", "about"]]
+    clean_words = _clean_keywords(query)
     if not clean_words:
-        clean_words = ["census", "guidelines"]
-
-    def _run_fts(fts_query):
-        cursor.execute("""
-            SELECT m.*, rank FROM manual_chunks m
-            JOIN manual_chunks_fts fts ON m.id = fts.rowid
-            WHERE manual_chunks_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-        """, (fts_query, limit))
-        return cursor.fetchall()
+        conn.close()
+        return []
 
     def _term_clause(w):
-        # The Porter stemmer unifies plenty of pairs on its own (duty/duties,
-        # define/defined), but not derivational ones like definition/defined
-        # — those diverge too early for the stemmer to merge. For longer
-        # words, OR in a short 5-char prefix alongside the full-word prefix;
-        # empirically this catches most of those cases (definition↔defined,
-        # criteria↔criterion, allocation↔allocated, supervisor↔supervisory)
-        # without being so short it starts matching unrelated words.
         if len(w) > 8:
             return f'("{w}"* OR "{w[:5]}"*)'
         return f'"{w}"*'
 
-    rows = []
-    # Try an AND match first — every keyword must appear (as a stemmed
-    # prefix) in the same chunk. This is far more precise than OR: for a
-    # query like "household definition criteria", an OR match matches almost
-    # every chunk in the document (since "household" appears on nearly every
-    # page), and ranking alone doesn't reliably surface the one chunk that
-    # actually defines it. Requiring all terms narrows that down sharply.
-    # Only fall back to OR (then plain LIKE) if AND finds nothing at all.
+    candidates = {}
+
     if len(clean_words) > 1:
-        and_query = " AND ".join([_term_clause(w) for w in clean_words])
+        and_query = " AND ".join(_term_clause(w) for w in clean_words)
         try:
-            rows = _run_fts(and_query)
+            cursor.execute("""
+                SELECT m.* FROM manual_chunks m
+                JOIN manual_chunks_fts fts ON m.id = fts.rowid
+                WHERE manual_chunks_fts MATCH ?
+                LIMIT ?
+            """, (and_query, limit * 4))
+            for row in cursor.fetchall():
+                candidates[row["id"]] = row
         except Exception as e:
             logger.debug(f"Manual FTS AND query error: {e}")
 
-    if not rows:
-        or_query = " OR ".join([f'"{w}"*' for w in clean_words])
-        try:
-            rows = _run_fts(or_query)
-        except Exception as e:
-            logger.debug(f"Manual FTS OR query error: {e}")
+    # Also pull a broader OR-based recall pool for scoring — a real match can
+    # still score well even if the strict AND clause above missed it (e.g.
+    # tokenization quirks), but every candidate here still has to clear the
+    # keyword-overlap bar below before it's actually returned.
+    or_query = " OR ".join(f'"{w}"*' for w in clean_words)
+    try:
+        cursor.execute("""
+            SELECT m.* FROM manual_chunks m
+            JOIN manual_chunks_fts fts ON m.id = fts.rowid
+            WHERE manual_chunks_fts MATCH ?
+            LIMIT ?
+        """, (or_query, max(limit * 8, 30)))
+        for row in cursor.fetchall():
+            candidates.setdefault(row["id"], row)
+    except Exception as e:
+        logger.debug(f"Manual FTS OR query error: {e}")
 
-    for row in rows:
+    if not candidates:
+        for word in clean_words[:3]:
+            cursor.execute("""
+                SELECT * FROM manual_chunks
+                WHERE chunk_text LIKE ? OR section_header LIKE ?
+                LIMIT 20
+            """, (f"%{word}%", f"%{word}%"))
+            for row in cursor.fetchall():
+                candidates.setdefault(row["id"], row)
+
+    def _word_present(w, text_lower):
+        wl = w.lower()
+        if wl in text_lower:
+            return True
+        stem = _stem(w)
+        if stem and stem in text_lower:
+            return True
+        if len(w) > 8 and w[:5].lower() in text_lower:
+            return True
+        return False
+
+    scored = []
+    for row in candidates.values():
+        text_lower = ((row["chunk_text"] or "") + " " + (row["section_header"] or "")).lower()
+        score = sum(1 for w in clean_words if _word_present(w, text_lower))
+        if score > 0:
+            scored.append((score, row))
+
+    # Require MOST of the query's keywords to actually be present in the
+    # chunk — this is what keeps an unrelated question (where every real
+    # chunk scores 0 or 1 out of 4-5 keywords) from returning anything at all.
+    if len(clean_words) == 1:
+        required = 1
+    elif len(clean_words) == 2:
+        required = 2
+    else:
+        required = max(2, round(len(clean_words) * 0.6))
+
+    scored = [t for t in scored if t[0] >= required]
+    scored.sort(key=lambda t: -t[0])
+
+    results = []
+    for score, row in scored[:limit]:
         results.append({
             "source_file": row["source_file"],
             "doc_title": row["doc_title"],
@@ -255,26 +375,6 @@ def search_manual_chunks(query: str, limit: int = 3) -> List[Dict[str, Any]]:
             "chunk_text": row["chunk_text"],
             "source": f"{row['doc_title']}, Page {row['page_number']}"
         })
-
-    # Fallback to LIKE
-    if not results and clean_words:
-        for word in clean_words[:2]:
-            cursor.execute("""
-                SELECT * FROM manual_chunks
-                WHERE chunk_text LIKE ? OR section_header LIKE ?
-                LIMIT ?
-            """, (f"%{word}%", f"%{word}%", limit))
-            for row in cursor.fetchall():
-                results.append({
-                    "source_file": row["source_file"],
-                    "doc_title": row["doc_title"],
-                    "page_number": row["page_number"],
-                    "section_header": row["section_header"],
-                    "chunk_text": row["chunk_text"],
-                    "source": f"{row['doc_title']}, Page {row['page_number']}"
-                })
-                if len(results) >= limit:
-                    break
 
     conn.close()
     return results
@@ -311,10 +411,12 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
                 )
                 citations.append(rec['source'])
             else:
+                area_bit = f" | Area/Village: {rec['area_name']}" if rec.get("area_name") else ""
+                confidence_bit = " [Note: closest match, not an exact name match]" if rec.get("confidence") == "low" else ""
                 context_parts.append(
                     f"{idx}. Name: {rec['name']} | User ID: {rec['user_id']} | "
                     f"Role: {rec['functionary_type']} | Mobile: {rec['mobile_number']} | "
-                    f"District: {rec['district']} | Sub-District: {rec['sub_district']} | Status: {rec['status']}"
+                    f"District: {rec['district']} | Sub-District: {rec['sub_district']} | Status: {rec['status']}{area_bit}{confidence_bit}"
                 )
                 citations.append(rec['source'])
 

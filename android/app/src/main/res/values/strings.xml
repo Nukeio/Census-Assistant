@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Census Assistant</string>
+    <string name="app_description">GoI Population Census Field Officer App</string>
+    <string name="loading">Loading…</string>
+    <string name="offline_message">You are offline. Showing cached data.</string>
+    <string name="exit_title">Exit Census Assistant</string>
+    <string name="exit_message">Are you sure you want to exit?</string>
+    <string name="exit_confirm">Exit</string>
+    <string name="exit_cancel">Stay</string>
+    <string name="call_permission_rationale">Phone permission is needed to directly call support contacts.</string>
+    <string name="error_no_dialer">No phone dialer app found on this device.</string>
+    <string name="error_whatsapp">WhatsApp is not installed on this device.</string>
+    <string name="error_share">Unable to share content from this device.</string>
+</resources>

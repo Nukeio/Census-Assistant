@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Ashoka Chakra-inspired circle on census blue -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,18 C73.88,18 90,34.12 90,54 C90,73.88 73.88,90 54,90 C34.12,90 18,73.88 18,54 C18,34.12 34.12,18 54,18 Z" />
+    <path
+        android:fillColor="#000666"
+        android:pathData="M54,24 C70.57,24 84,37.43 84,54 C84,70.57 70.57,84 54,84 C37.43,84 24,70.57 24,54 C24,37.43 37.43,24 54,24 Z" />
+    <!-- Census symbol: stylized C letter -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:pathData="M67,42 C63,37 57,34 51,34 C40,34 32,42 32,54 C32,66 40,74 51,74 C57,74 63,71 67,66 L61,62 C59,65 55,67 51,67 C44,67 39,61 39,54 C39,47 44,41 51,41 C55,41 59,43 61,46 Z" />
+</vector>

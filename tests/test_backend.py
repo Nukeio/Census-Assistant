@@ -1,0 +1,133 @@
+"""
+Census Assistant - End-to-End Automated Test Suite
+Validates backend APIs, RAG pipeline, Auth, Database, and Multilingual answers.
+"""
+
+import os
+import sys
+import unittest
+import json
+
+# Ensure project root is in sys.path
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from backend.database import get_db_connection, init_database
+from backend.ingestion import ingest_all_users, ingest_hlb_allocation
+from backend.rag_engine import detect_intent, retrieve_rag_context, search_structured_records, search_manual_chunks
+from backend.llm_provider import answer_query
+from backend.auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
+from backend.main import app
+
+class CensusAssistantTestSuite(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        """Initialize test environment and flask test client."""
+        init_database()
+        cls.client = app.test_client()
+
+    def test_01_database_population(self):
+        """Verify that Excel and PDF data are properly indexed in database."""
+        conn = get_db_connection()
+        func_cnt = conn.execute("SELECT COUNT(*) FROM functionaries").fetchone()[0]
+        hlb_cnt = conn.execute("SELECT COUNT(*) FROM hlb_allocations").fetchone()[0]
+        chunk_cnt = conn.execute("SELECT COUNT(*) FROM manual_chunks").fetchone()[0]
+        conn.close()
+
+        self.assertGreaterEqual(func_cnt, 800, f"Expected >= 800 functionaries, got {func_cnt}")
+        self.assertGreaterEqual(hlb_cnt, 600, f"Expected >= 600 HLB allocations, got {hlb_cnt}")
+        self.assertGreaterEqual(chunk_cnt, 35, f"Expected >= 35 manual chunks, got {chunk_cnt}")
+
+    def test_02_intent_classification(self):
+        """Test intent classification logic for different query types."""
+        self.assertEqual(detect_intent("Who is assigned to EB 12?"), "RECORD_SEARCH")
+        self.assertEqual(detect_intent("Who is the supervisor for Shahin Sha?"), "SUPERVISOR_QUERY")
+        self.assertEqual(detect_intent("What is the definition of a household?"), "MANUAL_SEARCH")
+        self.assertEqual(detect_intent("Hello, how are you?"), "GENERAL")
+
+    def test_03_structured_records_search(self):
+        """Test search for specific enumerators and EB numbers."""
+        results = search_structured_records("EB 12", limit=5)
+        self.assertTrue(len(results) > 0, "Expected search results for EB 12")
+        self.assertIn("hlb_no", results[0])
+
+        shahin_results = search_structured_records("Shahin Sha", limit=5)
+        self.assertTrue(len(shahin_results) > 0, "Expected search results for Shahin Sha")
+
+    def test_04_manual_chunks_search(self):
+        """Test full-text retrieval for manual instructions."""
+        chunks = search_manual_chunks("household", limit=3)
+        self.assertTrue(len(chunks) > 0, "Expected manual chunks matching 'household'")
+        self.assertTrue("chunk_text" in chunks[0])
+
+    def test_05_rag_multilingual_answers(self):
+        """Test RAG engine answering queries in all 4 supported languages."""
+        langs = ["en", "as", "hi", "bn"]
+        for lang in langs:
+            res = answer_query("Who is assigned to EB 12?", model_name="gemini-2.5-flash", lang=lang)
+            self.assertIn("answer", res)
+            self.assertGreater(len(res["answer"]), 20)
+            self.assertTrue(len(res["citations"]) > 0)
+
+    def test_06_auth_flow(self):
+        """Test Guest, OTP, and Admin authentication workflows."""
+        # 1. Guest Session
+        guest = create_guest_session()
+        self.assertTrue(guest["authenticated"])
+        self.assertIsNotNone(guest["token"])
+
+        # 2. OTP Request & Verification
+        otp_req = request_otp("8453441975")
+        self.assertTrue(otp_req["success"])
+        otp_code = otp_req["debug_otp"]
+        otp_ver = verify_otp("8453441975", otp_code)
+        self.assertTrue(otp_ver["success"])
+        self.assertEqual(otp_ver["user"]["name"], "SHAHIN SHA ALOMGIR")
+
+        # 3. Admin Login
+        adm = admin_login("admin", "admin123")
+        self.assertTrue(adm["success"])
+        self.assertEqual(adm["user"]["role"], "admin")
+
+    def test_07_rest_api_endpoints(self):
+        """Test all core REST endpoints via Flask test client."""
+        # 1. /api/chat
+        chat_resp = self.client.post("/api/chat", json={"query": "Who is the supervisor for Lakhipur?"})
+        self.assertEqual(chat_resp.status_code, 200)
+        chat_data = chat_resp.get_json()
+        self.assertIn("answer", chat_data)
+
+        # 2. /api/records/search
+        rec_resp = self.client.get("/api/records/search?q=Shahin&filter=name")
+        self.assertEqual(rec_resp.status_code, 200)
+        rec_data = rec_resp.get_json()
+        self.assertGreater(len(rec_data["results"]), 0)
+
+        # 3. /api/records/supervisor
+        sup_resp = self.client.get("/api/records/supervisor")
+        self.assertEqual(sup_resp.status_code, 200)
+        sup_data = sup_resp.get_json()
+        self.assertEqual(sup_data["name"], "S. A. Ahmed")
+
+        # 4. /api/admin/stats
+        stats_resp = self.client.get("/api/admin/stats")
+        self.assertEqual(stats_resp.status_code, 200)
+        stats_data = stats_resp.get_json()
+        self.assertGreater(stats_data["total_records"], 1000)
+
+        # 5. /api/channels/status
+        chan_resp = self.client.get("/api/channels/status")
+        self.assertEqual(chan_resp.status_code, 200)
+        chan_data = chan_resp.get_json()
+        self.assertEqual(chan_data["primary_channel"], "WhatsApp Business Platform")
+
+    def test_08_whatsapp_webhook_verification(self):
+        """Test WhatsApp Webhook token verification endpoint."""
+        resp = self.client.get("/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=census_assistant_webhook_verify_2024&hub.challenge=123456789")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data.decode("utf-8"), "123456789")
+
+if __name__ == "__main__":
+    unittest.main()

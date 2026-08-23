@@ -1,0 +1,13 @@
+<resources>
+    <!-- Government of India Census Blue -->
+    <color name="census_blue">#000666</color>
+    <color name="census_blue_dark">#00044a</color>
+    <color name="census_blue_light">#1a237e</color>
+    <color name="census_accent">#FF6F00</color>
+    <color name="census_gold">#FFB300</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="surface_dark">#0D1117</color>
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#B0BEC5</color>
+</resources>

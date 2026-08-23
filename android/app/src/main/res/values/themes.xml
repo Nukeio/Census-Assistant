@@ -1,0 +1,20 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme -->
+    <style name="Theme.CensusAssistant" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Government India Blue palette -->
+        <item name="colorPrimary">@color/census_blue</item>
+        <item name="colorPrimaryVariant">@color/census_blue_dark</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/census_accent</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="android:statusBarColor">@color/census_blue_dark</item>
+        <item name="android:navigationBarColor">@color/census_blue_dark</item>
+        <item name="android:windowBackground">@color/census_blue_dark</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
+    </style>
+
+    <!-- Splash/launch theme (shown before WebView loads) -->
+    <style name="Theme.CensusAssistant.Splash" parent="Theme.CensusAssistant">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+</resources>

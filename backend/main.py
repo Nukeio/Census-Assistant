@@ -63,6 +63,16 @@ def _require_admin():
         return jsonify({"success": False, "error": "Admin authentication required."}), 403
     return None
 
+def _is_admin_request():
+    """
+    Non-strict admin check for otherwise-public endpoints (record search,
+    supervisor list) that should still hide DISABLED functionaries from
+    regular guest/OTP-authenticated users while letting the admin see
+    everything, including disabled accounts, in the same views.
+    """
+    user = _authenticated_user()
+    return bool(user and user.get("role") == "admin")
+
 # ----------------- Static Frontend Routes -----------------
 @app.route("/")
 def serve_index():
@@ -184,21 +194,25 @@ def records_search():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    show_disabled = _is_admin_request()
+    disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR f.status != 'DISABLED')"
+
     if filter_by == "hlb":
         # Search HLB allocation directly with a COUNT for proper pagination
         count_cursor = conn.cursor()
-        count_cursor.execute("""
+        count_cursor.execute(f"""
             SELECT COUNT(*) FROM hlb_allocations h
-            WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            WHERE (h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?) {disabled_clause}
         """, (f"%{q}%", f"%{q}%"))
         total = count_cursor.fetchone()[0]
 
-        cursor.execute("""
-            SELECT h.*, f.mobile_number, f.district, f.sub_district, d.village_ward_name, d.landmark
+        cursor.execute(f"""
+            SELECT h.*, f.mobile_number, f.district, f.sub_district, f.status, d.village_ward_name, d.landmark
             FROM hlb_allocations h
             LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
             LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
-            WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
+            WHERE (h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?) {disabled_clause}
             ORDER BY h.id ASC
             LIMIT ? OFFSET ?
         """, (f"%{q}%", f"%{q}%", limit, offset))
@@ -235,18 +249,19 @@ def records_search():
         # Search by supervisory circle
         circle_clean = re.sub(r'\D', '', q) or q
         count_cursor = conn.cursor()
-        count_cursor.execute("""
+        count_cursor.execute(f"""
             SELECT COUNT(*) FROM hlb_allocations h
-            WHERE h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            WHERE (h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?) {disabled_clause}
         """, (f"%{q}%", circle_clean))
         total = count_cursor.fetchone()[0]
 
-        cursor.execute("""
-            SELECT h.*, f.mobile_number, f.district, f.sub_district, d.village_ward_name, d.landmark
+        cursor.execute(f"""
+            SELECT h.*, f.mobile_number, f.district, f.sub_district, f.status, d.village_ward_name, d.landmark
             FROM hlb_allocations h
             LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
             LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
-            WHERE h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?
+            WHERE (h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?) {disabled_clause}
             ORDER BY h.id ASC
             LIMIT ? OFFSET ?
         """, (f"%{q}%", circle_clean, limit, offset))
@@ -296,6 +311,9 @@ def records_search():
         else:
             where_clauses.append("(f.name LIKE ? OR f.user_id LIKE ? OR f.mobile_number LIKE ? OR f.functionary_type LIKE ? OR f.village_town LIKE ?)")
             params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+
+    if not show_disabled:
+        where_clauses.append("(f.status IS NULL OR f.status != 'DISABLED')")
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -361,11 +379,15 @@ def supervisor_list():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    show_disabled = _is_admin_request()
+
     where_sql = "WHERE functionary_type LIKE '%Supervisor%'"
     params = []
     if q:
         where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
         params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+    if not show_disabled:
+        where_sql += " AND (status IS NULL OR status != 'DISABLED')"
 
     cursor.execute(f"""
         SELECT * FROM functionaries {where_sql} ORDER BY name ASC LIMIT ?
@@ -381,14 +403,15 @@ def supervisor_list():
         circles = [c["supervisory_circle_no"] for c in cursor.fetchall() if c["supervisory_circle_no"]]
 
         # Pull all enumerators reporting under this supervisor across all 3 sheets
-        cursor.execute("""
+        enum_disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR f.status != 'DISABLED')"
+        cursor.execute(f"""
             SELECT h.hlb_no, h.supervisory_circle_no, h.enumerator_name, h.enumerator_user_id, h.allotment_date,
                    f.mobile_number, f.district, f.sub_district, f.village_town,
                    d.village_ward_name, d.landmark, d.boundary_description
             FROM hlb_allocations h
             LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
             LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
-            WHERE h.supervisor_name = ? OR h.supervisor_name LIKE ?
+            WHERE (h.supervisor_name = ? OR h.supervisor_name LIKE ?) {enum_disabled_clause}
             ORDER BY cast(h.hlb_no as integer) ASC
         """, (r["name"], f"%{r['name']}%"))
         assigned_rows = cursor.fetchall()

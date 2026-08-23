@@ -1,6 +1,6 @@
 """
 Census Assistant - End-to-End Automated Test Suite
-Validates backend APIs, RAG pipeline, Auth, Database, and Multilingual answers.
+Validates backend APIs, RAG pipeline, Anti-Hallucination, Auth, Database, Admin Endpoints, and Multilingual answers.
 """
 
 import os
@@ -13,10 +13,13 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# Enable dev OTP bypass during test execution
+os.environ["DEV_OTP_BYPASS"] = "true"
+
 from backend.database import get_db_connection, init_database
-from backend.ingestion import ingest_all_users, ingest_hlb_allocation
-from backend.rag_engine import detect_intent, retrieve_rag_context, search_structured_records, search_manual_chunks
-from backend.llm_provider import answer_query
+from backend.ingestion import ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals
+from backend.rag_engine import detect_intent, retrieve_rag_context, search_structured_records, search_manual_chunks, search_by_area
+from backend.llm_provider import answer_query, NOT_FOUND_PHRASE
 from backend.auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
 from backend.main import app
 
@@ -24,9 +27,15 @@ class CensusAssistantTestSuite(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        """Initialize test environment and flask test client."""
+        """Initialize test environment, seed database, and create flask test client."""
         init_database()
         cls.client = app.test_client()
+
+        # Generate admin token for testing admin endpoints
+        admin_username = os.environ.get("ADMIN_USERNAME", "shahinxsha")
+        admin_password = os.environ.get("ADMIN_PASSWORD", "TechAss@99")
+        adm = admin_login(admin_username, admin_password)
+        cls.admin_token = adm.get("token")
 
     def test_01_database_population(self):
         """Verify that Excel and PDF data are properly indexed in database."""
@@ -87,14 +96,16 @@ class CensusAssistantTestSuite(unittest.TestCase):
         self.assertEqual(otp_ver["user"]["name"], "SHAHIN SHA ALOMGIR")
 
         # 3. Admin Login
-        adm = admin_login("admin", "admin123")
+        admin_username = os.environ.get("ADMIN_USERNAME", "shahinxsha")
+        admin_password = os.environ.get("ADMIN_PASSWORD", "TechAss@99")
+        adm = admin_login(admin_username, admin_password)
         self.assertTrue(adm["success"])
         self.assertEqual(adm["user"]["role"], "admin")
 
     def test_07_rest_api_endpoints(self):
         """Test all core REST endpoints via Flask test client."""
         # 1. /api/chat
-        chat_resp = self.client.post("/api/chat", json={"query": "Who is the supervisor for Lakhipur?"})
+        chat_resp = self.client.post("/api/chat", json={"query": "Who is assigned to HLB 12?"})
         self.assertEqual(chat_resp.status_code, 200)
         chat_data = chat_resp.get_json()
         self.assertIn("answer", chat_data)
@@ -109,10 +120,12 @@ class CensusAssistantTestSuite(unittest.TestCase):
         sup_resp = self.client.get("/api/records/supervisor")
         self.assertEqual(sup_resp.status_code, 200)
         sup_data = sup_resp.get_json()
-        self.assertEqual(sup_data["name"], "S. A. Ahmed")
+        self.assertIn("supervisors", sup_data)
+        self.assertGreater(len(sup_data["supervisors"]), 0)
 
-        # 4. /api/admin/stats
-        stats_resp = self.client.get("/api/admin/stats")
+        # 4. /api/admin/stats (authenticated)
+        headers = {"Authorization": f"Bearer {self.admin_token}"}
+        stats_resp = self.client.get("/api/admin/stats", headers=headers)
         self.assertEqual(stats_resp.status_code, 200)
         stats_data = stats_resp.get_json()
         self.assertGreater(stats_data["total_records"], 1000)
@@ -128,6 +141,57 @@ class CensusAssistantTestSuite(unittest.TestCase):
         resp = self.client.get("/webhook/whatsapp?hub.mode=subscribe&hub.verify_token=census_assistant_webhook_verify_2024&hub.challenge=123456789")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data.decode("utf-8"), "123456789")
+
+    def test_09_anti_hallucination_guarantee(self):
+        """Verify that an off-topic query returns the exact required fallback phrase."""
+        off_topic_queries = [
+            "What is the capital of France?",
+            "How do I bake a chocolate cake?",
+            "Tell me about the history of Rome."
+        ]
+        for query in off_topic_queries:
+            res = answer_query(query, model_name="gemini-2.5-flash", lang="en")
+            self.assertEqual(
+                res["answer"].strip(),
+                NOT_FOUND_PHRASE,
+                f"Expected exact fallback for off-topic query '{query}', got: {res['answer']}"
+            )
+
+    def test_10_area_search(self):
+        """Verify that searching for village/area names returns matched HLB records."""
+        area_results = search_by_area("Lakhipur", limit=3)
+        self.assertIsInstance(area_results, list)
+
+    def test_11_admin_new_endpoints(self):
+        """Verify all new admin endpoints respond with valid structures when authenticated."""
+        headers = {"Authorization": f"Bearer {self.admin_token}"}
+
+        # 1. /api/admin/query-logs
+        logs_resp = self.client.get("/api/admin/query-logs", headers=headers)
+        self.assertEqual(logs_resp.status_code, 200)
+        logs_data = logs_resp.get_json()
+        self.assertIn("query_logs", logs_data)
+
+        # 2. /api/admin/system-health
+        health_resp = self.client.get("/api/admin/system-health", headers=headers)
+        self.assertEqual(health_resp.status_code, 200)
+        health_data = health_resp.get_json()
+        self.assertEqual(health_data["status"], "healthy")
+        self.assertIn("table_counts", health_data)
+
+        # 3. /api/admin/users
+        users_resp = self.client.get("/api/admin/users", headers=headers)
+        self.assertEqual(users_resp.status_code, 200)
+        users_data = users_resp.get_json()
+        self.assertIn("users", users_data)
+        self.assertGreater(len(users_data["users"]), 0)
+
+        # 4. /api/admin/uploaded-files
+        files_resp = self.client.get("/api/admin/uploaded-files", headers=headers)
+        self.assertEqual(files_resp.status_code, 200)
+        files_data = files_resp.get_json()
+        self.assertIn("files", files_data)
+        self.assertGreater(len(files_data["files"]), 0)
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,33 +14,42 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("LLMProvider")
 logging.basicConfig(level=logging.INFO)
 
+# Exact phrase required when information is not in the uploaded documents.
+NOT_FOUND_PHRASE = "This information is not available in the uploaded Census documents."
+
 SYSTEM_PROMPTS = {
     "en": (
         "You are the official AI Census Assistant for Lakhipur Circle, India. "
-        "Your task is to provide accurate, concise, and helpful answers strictly based on the provided Census Records (Excel) "
-        "and Official Manuals/FAQs (PDF). "
-        "RULES:\n"
-        "1. DO NOT HALLUCINATE. Answer only what is stated in the provided context.\n"
-        "2. If the information is not in the context, explicitly state: 'This information is not available in the uploaded Census records or manuals.'\n"
-        "3. Always cite your sources at the bottom (e.g. 'Source: Census Record DB - 2024' or 'Source: Census Manual 2024, Page X').\n"
-        "4. When technical assistance is needed, remind the user to contact one of the two Technical Assistants: "
-        "Shahin Sha A. (+91 84534 41975) or S. A. Ahmed (+91 69019 80926) on WhatsApp. Neither of them is a supervisor "
-        "— real supervisor names come only from the Census Records context provided to you.\n"
-        "5. Keep responses professional, structured, and easy to read."
+        "Your ONLY knowledge source is the context provided below between === CONTEXT DATA === tags. "
+        "STRICT RULES — violations are not allowed under any circumstances:\n"
+        "1. NEVER answer from your own training knowledge. If the answer is not explicitly stated in the CONTEXT DATA, "
+        f"you MUST respond with exactly: '{NOT_FOUND_PHRASE}'\n"
+        "2. Do not guess, infer, or extrapolate beyond what the context states.\n"
+        "3. If CONTEXT DATA contains OFFICIAL CENSUS RECORDS, always prioritize and present those facts first.\n"
+        "4. Always cite your source at the bottom (e.g. 'Source: Census Record DB - 2024' or 'Source: HLO Manual, Page X').\n"
+        "5. When technical assistance is needed, remind the user to contact one of the two Technical Assistants: "
+        "Shahin Sha A. (+91 84534 41975) or S. A. Ahmed (+91 69019 80926) on WhatsApp. "
+        "Neither of them is a supervisor — real supervisor names come only from the Census Records context provided to you.\n"
+        "6. Keep responses professional, structured, and easy to read.\n"
+        "7. IMPORTANT: If the CONTEXT DATA section is empty or contains no relevant information for the question asked, "
+        f"respond with exactly: '{NOT_FOUND_PHRASE}'"
     ),
     "as": (
         "আপুনি লাক্ষীপুৰ চাৰ্কেলৰ চৰকাৰী এআই লোকপিয়ল সহায়ক (AI Census Assistant)। "
         "যোগান ধৰা লোকপিয়ল তথ্য (Excel) আৰু চৰকাৰী নিৰ্দেশনা/মেনুৱেল (PDF) ৰ ওপৰত ভিত্তি কৰি সঠিক উত্তৰ দিয়ক। "
+        "প্ৰসংগত নথকা তথ্য দিব নালাগে। "
         "অনুগ্ৰহ কৰি অসমীয়াত উত্তৰ দিয়ক আৰু তথ্যৰ উৎস উল্লেখ কৰক।"
     ),
     "hi": (
         "आप लखीपुर सर्कल के आधिकारिक एआई जनगणना सहायक (AI Census Assistant) हैं। "
         "प्रदान किए गए जनगणना रिकॉर्ड (Excel) और आधिकारिक नियमावली (PDF) के आधार पर सटीक और संक्षिप्त उत्तर दें। "
+        "संदर्भ में उपलब्ध जानकारी के बाहर कभी उत्तर न दें। "
         "कृपया स्पष्ट हिंदी में उत्तर दें और जानकारी के स्रोत का उल्लेख करें।"
     ),
     "bn": (
         "আপনি লাখিপুর সার্কেলের অফিসিয়াল এআই আদমশুমারি সহকারী (AI Census Assistant)। "
         "প্রদত্ত আদমশুমারি রেকর্ড (Excel) এবং নির্দেশিকা ম্যানুয়াল (PDF) এর উপর ভিত্তি করে সঠিক উত্তর প্রদান করুন। "
+        "প্রসঙ্গের বাইরে কোনো তথ্য দেবেন না। "
         "অনুগ্রহ করে স্পষ্ট বাংলায় উত্তর দিন এবং তথ্যের উৎস উল্লেখ করুন।"
     )
 }
@@ -210,38 +219,10 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"For technical assistance, contact **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
                 )
 
-    # 3. Person Name lookup. Previously this required intent == "RECORD_SEARCH"
-    # exactly, but detect_intent()'s keyword regex didn't recognize phrasing
-    # like "Show details for <name>" (used by the ">" button on a search
-    # result card), so that phrasing classified as GENERAL and this section
-    # was skipped, falling through to the generic manual-guideline answer.
-    # That was fixed by broadening detect_intent()'s RECORD_SEARCH regex
-    # itself to recognize "show details for" / "details for" / "profile of"
-    # — so it's safe (and necessary) to go back to the strict intent check
-    # here. Loosening this check the naive way (e.g. "intent != MANUAL_SEARCH")
-    # caused unrelated general questions to be hijacked into a false
-    # "Functionary Record Found" whenever a stray word in the question
-    # happened to prefix-match some unrelated person/village in the DB.
-    #
-    # GENERAL is also allowed through here (in addition to RECORD_SEARCH) —
-    # someone typing just a plain name with no other keyword ("who is
-    # Shahin Sha Alomgir") classifies as GENERAL, not RECORD_SEARCH. This is
-    # safe because rag_engine.search_structured_records() runs in `strict`
-    # mode for GENERAL intent, requiring EVERY keyword in the query to match
-    # the same record (AND, not OR) — a multi-word unrelated question like
-    # "do we use pen or pencil to draw the map" cannot satisfy that, so no
-    # record is ever found for it in the first place (verified: intent stays
-    # GENERAL with zero record_results for that exact query).
+    # 3. Person Name lookup (RECORD_SEARCH or GENERAL intent with confirmed record match)
     if records and intent in ("RECORD_SEARCH", "GENERAL"):
         rec = records[0]
         if rec.get("type") == "functionary":
-            # rag_engine now tags every functionary match with a confidence:
-            # "high" means every significant word in the query matched this
-            # exact record (safe to state as fact); "low" means only a
-            # fallback single-keyword match was found (e.g. the name wasn't
-            # an exact match) — that's still useful, but it should say so
-            # instead of asserting it as confidently as an exact match, which
-            # is what caused the wrong-person mix-ups reported earlier.
             is_low_confidence = rec.get("confidence") == "low"
             title = (
                 "**Closest Match Found** (not an exact match for your search — "
@@ -267,11 +248,6 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     # 4. Manual Guidelines / Definitions / Procedures
     if manuals:
         doc = manuals[0]
-        # Center the excerpt on the actual matched keywords instead of
-        # always showing the start of the chunk — a matched chunk can be
-        # ~800 chars covering several unrelated FAQ items, and the first
-        # 500 of those chars are often not the part that answers the
-        # question that was actually asked.
         query_keywords = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3]
         text_snippet = _relevant_snippet(doc["chunk_text"], query_keywords)
 
@@ -281,49 +257,33 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
             f"📌 *Source: {doc['doc_title']}, Page {doc['page_number']}*"
         )
 
-    # 5. Fallback general answer
-    if lang == "as":
-        return (
-            f"ক্ষমা কৰিব, এই প্ৰশ্নৰ বাবে কোনো তথ্য পোৱা নগ'ল।\n"
-            f"আপুনি কোনো বিশেষ ব্লক নম্বৰ (যেনে: HLB 12), পৰ্যবেক্ষকৰ নাম বা নিয়ম নিৰ্দেশনা সম্পৰ্কে সুধিব পাৰে।\n\n"
-            f"কাৰিকৰী সহায়ৰ বাবে যোগাযোগ কৰক: **শ্বাহীন শ্বাহ এ.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
-        )
-    elif lang == "hi":
-        return (
-            f"क्षमा करें, इस प्रश्न के लिए डेटाबेस में कोई विशिष्ट रिकॉर्ड नहीं मिला।\n"
-            f"आप किसी विशेष ब्लॉक नंबर (जैसे HLB 12), पर्यवेक्षक का नाम या जनगणना नियमावली के बारे में पूछ सकते हैं।\n\n"
-            f"तकनीकी सहायता के लिए संपर्क करें: **शाहीन शाह ए.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
-        )
-    elif lang == "bn":
-        return (
-            f"দুঃখিত, এই প্রশ্নের জন্য কোনো রেকর্ড পাওয়া যায়নি।\n"
-            f"আপনি নির্দিষ্ট ব্লক নম্বর (যেমন HLB 12), সুপারভাইজারের নাম বা নির্দেশিকা সম্পর্কে জানতে চাইতে পারেন।\n\n"
-            f"কারিগরি সহায়তার জন্য যোগাযোগ করুন: **শাহীন শাহ এ.** (+91 84534 41975, WhatsApp: https://wa.me/918453441975)"
-        )
-    else:
-        return (
-            f"I could not locate specific records matching your query in the current dataset.\n\n"
-            f"You can try searching for:\n"
-            f"• A House Listing Block / HLB (e.g. *'Who is assigned to HLB 12?'*)\n"
-            f"• Supervisor details (e.g. *'Show supervisor details'*)\n"
-            f"• Manual guidelines (e.g. *'What are the duties of a supervisor?'* or *'Household definition criteria'*)\n\n"
-            f"For direct field assistance, please reach out to Technical Assistant **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
-        )
+    # 5. Nothing found in any source — return the exact required phrase
+    return NOT_FOUND_PHRASE
 
 def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any], lang: str = "en") -> Optional[str]:
     """Call Google Gemini 2.5 Flash / Pro API using REST."""
     system_inst = SYSTEM_PROMPTS.get(lang, SYSTEM_PROMPTS["en"])
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    
+
+    context_text = context.get("context_text", "")
+
+    # If there is absolutely no context to ground the answer, skip the API call
+    # and return the exact not-found phrase — this prevents hallucination when
+    # neither records nor manual chunks matched the query.
+    if not context_text.strip():
+        logger.info("No context retrieved — skipping Gemini API call to prevent hallucination.")
+        return NOT_FOUND_PHRASE
+
     prompt = (
         f"{system_inst}\n\n"
-        f"=== CONTEXT DATA ===\n"
-        f"{context.get('context_text', '')}\n\n"
+        f"=== CONTEXT DATA (your ONLY knowledge source) ===\n"
+        f"{context_text}\n\n"
         f"=== CONTACT INFO ===\n"
         f"{context.get('contact_info', '')}\n\n"
         f"=== USER QUESTION ===\n"
         f"{query}\n\n"
-        f"Answer in the selected language ({lang}) strictly using the provided context."
+        f"CRITICAL REMINDER: Answer ONLY using the CONTEXT DATA above. "
+        f"If the answer is not in the context, respond with exactly: '{NOT_FOUND_PHRASE}'"
     )
 
     payload = {
@@ -331,7 +291,7 @@ def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.0,   # Zero temperature: deterministic, no hallucination
             "maxOutputTokens": 1024
         }
     }
@@ -344,7 +304,16 @@ def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if parts:
-                    return parts[0].get("text", "")
+                    answer = parts[0].get("text", "")
+                    # Post-call validation: if the answer doesn't reference any
+                    # context marker, it may be a hallucinated response. Fall
+                    # back to the local synthesizer which is grounded by design.
+                    context_markers = ["Source:", "HLB", "Enumerator", "Supervisor", "Census", "Manual", "Page", "Record"]
+                    has_context_reference = any(m.lower() in answer.lower() for m in context_markers)
+                    if answer and not has_context_reference and len(answer) > 100:
+                        logger.warning("Gemini response appears ungrounded — falling back to local RAG synthesizer.")
+                        return None  # Trigger local fallback
+                    return answer
         else:
             logger.warning(f"Gemini API returned status {resp.status_code}: {resp.text}")
     except Exception as e:
@@ -359,14 +328,19 @@ def answer_query(query: str, model_name: str = "gemini-2.5-flash", lang: str = "
 
     context = retrieve_rag_context(query)
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    
+
     answer = None
     if api_key and ("gemini" in model_name.lower()):
         answer = call_gemini_api(api_key, model_name, query, context, lang=lang)
 
-    # Fallback to local RAG synthesizer if no API key or API call failed
+    # Fallback to local RAG synthesizer if no API key, API call failed, or
+    # the call returned None (ungrounded response detected).
     if not answer:
         answer = generate_local_rag_response(query, context, lang=lang)
+
+    # Final safety net: ensure empty/None answers always return the not-found phrase
+    if not answer or not answer.strip():
+        answer = NOT_FOUND_PHRASE
 
     latency_ms = (time.time() - start_time) * 1000
 
@@ -385,7 +359,7 @@ def answer_query(query: str, model_name: str = "gemini-2.5-flash", lang: str = "
         conn.commit()
         conn.close()
     except Exception as e:
-        logger.debug(f"Could not log AI usage: {e}")
+        logger.warning(f"Could not log AI usage: {e}")
 
     return {
         "query": query,

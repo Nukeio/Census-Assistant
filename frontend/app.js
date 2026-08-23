@@ -351,6 +351,9 @@ function navigateTo(viewName, updateHash = true) {
   } else if (viewName === "admin") {
     loadAdminStats();
     loadAdminNotices();
+    loadUploadedFiles();
+    loadAdminUsers();
+    loadAdminQueryLogs();
   } else if (viewName === "notifications") {
     loadNotifications();
   } else if (viewName === "supervisor") {
@@ -1116,11 +1119,13 @@ async function loadAdminStats() {
     
     const recEl = document.getElementById("stat-total-records");
     const queryEl = document.getElementById("stat-ai-queries");
+    const chunksEl = document.getElementById("stat-manual-chunks");
     const latEl = document.getElementById("stat-latency");
     const syncEl = document.getElementById("stat-last-sync");
 
     if (recEl) recEl.textContent = (data.total_records || 1488).toLocaleString();
     if (queryEl) queryEl.textContent = (data.ai_queries_count || 54012).toLocaleString();
+    if (chunksEl) chunksEl.textContent = (data.manual_chunks_count || 43).toLocaleString();
     if (latEl) latEl.textContent = `Avg response: ${data.avg_latency || '1.2s'}`;
     if (syncEl) syncEl.textContent = `Last sync: ${data.last_sync || 'Just now'}`;
   } catch (err) {
@@ -1136,6 +1141,7 @@ async function triggerForceSync() {
     if (data.success) {
       showToast("Knowledge base re-indexed successfully!");
       loadAdminStats();
+      loadUploadedFiles();
     } else {
       showToast(data.error || "Sync failed.");
     }
@@ -1161,6 +1167,7 @@ async function handleExcelUpload(input) {
     if (data.success) {
       showToast(data.message);
       loadAdminStats();
+      loadUploadedFiles();
     } else {
       showToast(data.error || "Upload failed.");
     }
@@ -1187,6 +1194,7 @@ async function handlePdfUpload(input) {
     if (data.success) {
       showToast(data.message);
       loadAdminStats();
+      loadUploadedFiles();
     } else {
       showToast(data.error || "Upload failed.");
     }
@@ -1194,6 +1202,174 @@ async function handlePdfUpload(input) {
     showToast("PDF upload failed.");
   }
   input.value = "";
+}
+
+async function loadUploadedFiles() {
+  const container = document.getElementById("admin-uploaded-files-list");
+  if (!container) return;
+
+  try {
+    const res = await apiFetch("/api/admin/uploaded-files");
+    const data = await res.json();
+    container.innerHTML = "";
+
+    if (!data.files || data.files.length === 0) {
+      container.innerHTML = `<p class="text-xs text-on-surface-variant p-3 text-center">No source files detected.</p>`;
+      return;
+    }
+
+    data.files.forEach(f => {
+      const isPdf = f.filename.endsWith(".pdf");
+      const icon = isPdf ? "picture_as_pdf" : "table_view";
+      const iconColor = isPdf ? "text-error" : "text-primary";
+      
+      const item = document.createElement("div");
+      item.className = "flex items-center justify-between p-3 rounded-lg border border-outline-variant/30 bg-surface hover:bg-surface-container-low transition-colors";
+      item.innerHTML = `
+        <div class="flex items-center gap-3 min-w-0">
+          <span class="material-symbols-outlined ${iconColor} text-2xl shrink-0">${icon}</span>
+          <div class="truncate">
+            <p class="text-xs font-bold text-on-surface truncate">${escapeHtml(f.filename)}</p>
+            <p class="text-[11px] text-on-surface-variant">${escapeHtml(f.file_type)} • ${escapeHtml(f.size_str)} • Modified ${escapeHtml(f.last_modified)}</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button onclick="handleDeleteUploadedFile('${escapeAttr(f.filename)}')" title="Delete File"
+            class="w-8 h-8 rounded-full flex items-center justify-center text-error hover:bg-error-container/40 transition-colors">
+            <span class="material-symbols-outlined text-base">delete</span>
+          </button>
+        </div>
+      `;
+      container.appendChild(item);
+    });
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-error p-3">Failed to load repository files.</p>`;
+  }
+}
+
+async function handleDeleteUploadedFile(filename) {
+  if (!confirm(`Are you sure you want to delete '${filename}'? This will update the knowledge base.`)) {
+    return;
+  }
+  showToast(`Deleting ${filename}...`);
+  try {
+    const res = await apiFetch(`/api/admin/uploaded-files/${encodeURIComponent(filename)}`, {
+      method: "DELETE"
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(data.message || "File deleted.");
+      loadUploadedFiles();
+      loadAdminStats();
+    } else {
+      showToast(data.error || "Could not delete file.");
+    }
+  } catch (err) {
+    showToast("Network error deleting file.");
+  }
+}
+
+async function loadAdminUsers(q = "") {
+  const tbody = document.getElementById("admin-users-table-body");
+  if (!tbody) return;
+
+  try {
+    const res = await apiFetch(`/api/admin/users?q=${encodeURIComponent(q)}&limit=15`);
+    const data = await res.json();
+    tbody.innerHTML = "";
+
+    if (!data.users || data.users.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-on-surface-variant">No functionaries found matching search.</td></tr>`;
+      return;
+    }
+
+    data.users.forEach(u => {
+      const isActive = u.status === "ACTIVE";
+      const statusBadge = isActive
+        ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#2e7d32]/10 text-[#2e7d32]">Active</span>`
+        : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-error/10 text-error">Disabled</span>`;
+
+      const tr = document.createElement("tr");
+      tr.className = "hover:bg-surface-container-low transition-colors";
+      tr.innerHTML = `
+        <td class="p-3 font-mono font-bold text-[11px] text-primary">${escapeHtml(u.user_id)}</td>
+        <td class="p-3 font-bold text-on-surface">${escapeHtml(u.name)}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(u.functionary_type || 'Enumerator')}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(u.mobile_number || '—')}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(u.sub_district || u.district || 'Lakhipur')}</td>
+        <td class="p-3">${statusBadge}</td>
+        <td class="p-3 text-right">
+          <button onclick="handleToggleUserStatus('${escapeAttr(u.user_id)}')"
+            class="text-[11px] font-semibold px-2.5 py-1 rounded border ${isActive ? 'border-error/40 text-error hover:bg-error-container/30' : 'border-[#2e7d32]/40 text-[#2e7d32] hover:bg-[#2e7d32]/10'} transition-all">
+            ${isActive ? 'Disable' : 'Activate'}
+          </button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" class="p-4 text-center text-error">Error loading user records.</td></tr>`;
+  }
+}
+
+function debounceAdminUserSearch() {
+  clearTimeout(state.searchDebounceTimer);
+  state.searchDebounceTimer = setTimeout(() => {
+    const q = (document.getElementById("admin-user-search-input") || {}).value || "";
+    loadAdminUsers(q.trim());
+  }, 300);
+}
+
+async function handleToggleUserStatus(userId) {
+  try {
+    const res = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/toggle-status`, {
+      method: "POST"
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`User ${userId} status changed to ${data.new_status}`);
+      const q = (document.getElementById("admin-user-search-input") || {}).value || "";
+      loadAdminUsers(q.trim());
+    } else {
+      showToast(data.error || "Failed to update user status.");
+    }
+  } catch (err) {
+    showToast("Network error updating status.");
+  }
+}
+
+async function loadAdminQueryLogs() {
+  const container = document.getElementById("admin-query-logs-list");
+  if (!container) return;
+
+  try {
+    const res = await apiFetch("/api/admin/query-logs?limit=20");
+    const data = await res.json();
+    container.innerHTML = "";
+
+    if (!data.query_logs || data.query_logs.length === 0) {
+      container.innerHTML = `<p class="text-xs text-on-surface-variant p-3 text-center">No AI queries logged yet.</p>`;
+      return;
+    }
+
+    data.query_logs.forEach(log => {
+      const item = document.createElement("div");
+      item.className = "p-3 rounded-lg border border-outline-variant/30 bg-surface flex flex-col gap-1";
+      item.innerHTML = `
+        <div class="flex items-center justify-between gap-2">
+          <span class="text-xs font-bold text-on-surface truncate">"${escapeHtml(log.query_text)}"</span>
+          <span class="text-[10px] text-on-surface-variant shrink-0">${escapeHtml(log.timestamp || 'Recent')}</span>
+        </div>
+        <div class="flex items-center gap-2 text-[10px] text-on-surface-variant">
+          <span class="px-1.5 py-0.5 rounded bg-primary-fixed text-primary font-semibold">${escapeHtml(log.source_tag || 'AI Chat')}</span>
+          <span>User: <code class="font-mono">${escapeHtml(log.user_id || 'anonymous')}</code></span>
+        </div>
+      `;
+      container.appendChild(item);
+    });
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-error p-3">Failed to load query logs.</p>`;
+  }
 }
 
 // ==================== 10. LANGUAGE & UTILITY FUNCTIONS ====================

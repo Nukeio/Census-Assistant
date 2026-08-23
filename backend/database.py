@@ -28,7 +28,9 @@ def init_database():
     cursor = conn.cursor()
 
     try:
-        # Tables creation
+        # ------------------------------------------------------------------ #
+        # Core tables                                                          #
+        # ------------------------------------------------------------------ #
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS functionaries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +59,8 @@ def init_database():
                 enumerator_user_id TEXT,
                 allotment_date TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(hlb_no, enumerator_user_id)
             )
         """)
 
@@ -68,7 +71,8 @@ def init_database():
                 village_ward_name TEXT,
                 landmark TEXT,
                 boundary_description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(hlb_no)
             )
         """)
         cursor.execute("""
@@ -142,7 +146,20 @@ def init_database():
             )
         """)
 
-        # FTS5 Virtual Tables
+        # ------------------------------------------------------------------ #
+        # Performance indexes                                                  #
+        # ------------------------------------------------------------------ #
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_functionaries_name ON functionaries(name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_functionaries_mobile ON functionaries(mobile_number)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_hlb_no ON hlb_allocations(hlb_no)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_circle ON hlb_allocations(supervisory_circle_no)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_user ON hlb_allocations(enumerator_user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_timestamp ON activity_logs(timestamp)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_activity_logs_type ON activity_logs(action_type)")
+
+        # ------------------------------------------------------------------ #
+        # FTS5 Virtual Tables                                                  #
+        # ------------------------------------------------------------------ #
         try:
             cursor.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS functionaries_fts USING fts5(
@@ -156,37 +173,66 @@ def init_database():
                     content='hlb_allocations', content_rowid='id'
                 )
             """)
+
             # manual_chunks_fts uses the Porter stemmer (unlike the two FTS
             # tables above, which index proper nouns/IDs where stemming
             # would hurt exact matches). Guideline/FAQ text needs it badly —
             # without it, a search for "definition" never matches text that
-            # says "defined", "duties" never matches "duty", etc., which was
-            # producing irrelevant top-ranked answers for nearly every
-            # manual/FAQ question. Recreate it with the stemmer + rebuild the
-            # index from the content table every startup — self-healing,
-            # like the admin-account seed above, so a prior deploy without
-            # the stemmer heals itself without manual DB surgery.
-            cursor.execute("DROP TABLE IF EXISTS manual_chunks_fts")
-            cursor.execute("""
-                CREATE VIRTUAL TABLE manual_chunks_fts USING fts5(
-                    source_file, doc_title, page_number, section_header, chunk_text,
-                    content='manual_chunks', content_rowid='id',
-                    tokenize = 'porter unicode61'
+            # says "defined", "duties" never matches "duty", etc.
+            #
+            # SMART REBUILD: only DROP + CREATE + rebuild the FTS index if
+            # the manual_chunks row count changed since last startup — for a
+            # 97-MB PDF this rebuild otherwise blocks the WSGI worker for
+            # several seconds on every cold start.
+            current_chunk_count = cursor.execute("SELECT COUNT(*) FROM manual_chunks").fetchone()[0]
+            stored_setting = cursor.execute(
+                "SELECT value FROM system_settings WHERE key='manual_fts_last_chunk_count'"
+            ).fetchone()
+            last_known_count = int(stored_setting["value"]) if stored_setting else -1
+
+            if current_chunk_count != last_known_count:
+                logger.info(
+                    f"manual_chunks changed ({last_known_count} → {current_chunk_count}): "
+                    "rebuilding FTS index..."
                 )
-            """)
-            cursor.execute("INSERT INTO manual_chunks_fts(manual_chunks_fts) VALUES('rebuild')")
+                cursor.execute("DROP TABLE IF EXISTS manual_chunks_fts")
+                cursor.execute("""
+                    CREATE VIRTUAL TABLE manual_chunks_fts USING fts5(
+                        source_file, doc_title, page_number, section_header, chunk_text,
+                        content='manual_chunks', content_rowid='id',
+                        tokenize = 'porter unicode61'
+                    )
+                """)
+                cursor.execute("INSERT INTO manual_chunks_fts(manual_chunks_fts) VALUES('rebuild')")
+                cursor.execute("""
+                    INSERT INTO system_settings(key, value) VALUES('manual_fts_last_chunk_count', ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+                """, (str(current_chunk_count),))
+                logger.info("manual_chunks FTS rebuild complete.")
+            else:
+                # Ensure the FTS table exists even when chunk count hasn't changed
+                cursor.execute("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS manual_chunks_fts USING fts5(
+                        source_file, doc_title, page_number, section_header, chunk_text,
+                        content='manual_chunks', content_rowid='id',
+                        tokenize = 'porter unicode61'
+                    )
+                """)
+
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 setup note: {e}")
 
-        # Seed/refresh the single authorized admin account. Only Technical
-        # Assistants are meant to reach the admin portal — this runs on every
-        # startup, deletes any other admin username, and refreshes the
-        # password hash so the DB always has exactly this one admin identity,
-        # regardless of what was seeded in the past.
-        import hashlib
+        # ------------------------------------------------------------------ #
+        # Admin account seed — PBKDF2-SHA256 (replaces plain SHA-256)         #
+        # ------------------------------------------------------------------ #
+        # Import here to avoid a circular import at module load time.
+        from .auth import hash_password
+
         admin_username = os.environ.get("ADMIN_USERNAME", "shahinxsha")
         admin_password = os.environ.get("ADMIN_PASSWORD", "TechAss@99")
-        admin_pass_hash = hashlib.sha256(admin_password.encode("utf-8")).hexdigest()
+        admin_pass_hash = hash_password(admin_password)  # PBKDF2, random salt
+
+        # Keep exactly one admin: the Technical Assistant account.
         cursor.execute("DELETE FROM admin_users WHERE username != ?", (admin_username,))
         cursor.execute("""
             INSERT INTO admin_users (username, password_hash, full_name, role)
@@ -194,7 +240,9 @@ def init_database():
             ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash
         """, (admin_username, admin_pass_hash))
 
-        # Seed Default System Settings
+        # ------------------------------------------------------------------ #
+        # System settings defaults                                             #
+        # ------------------------------------------------------------------ #
         default_settings = {
             "active_model": "gemini-2.5-flash",
             "available_models": json.dumps(["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "claude-3-5-sonnet"]),
@@ -208,13 +256,14 @@ def init_database():
             "last_sync_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "sync_status": "Synced"
         }
-
         for k, v in default_settings.items():
             cursor.execute("""
                 INSERT OR IGNORE INTO system_settings (key, value) VALUES (?, ?)
             """, (k, v))
 
-        # Seed Initial Notifications
+        # ------------------------------------------------------------------ #
+        # Seed initial notifications (only if table is empty)                  #
+        # ------------------------------------------------------------------ #
         cursor.execute("SELECT COUNT(*) FROM notifications")
         if cursor.fetchone()[0] == 0:
             sample_notifs = [
@@ -228,7 +277,9 @@ def init_database():
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (title, content, cat, prio, badge, ts))
 
-        # Seed Initial Recent Activity
+        # ------------------------------------------------------------------ #
+        # Seed initial activity logs (only if table is empty)                  #
+        # ------------------------------------------------------------------ #
         cursor.execute("SELECT COUNT(*) FROM activity_logs")
         if cursor.fetchone()[0] == 0:
             sample_activities = [

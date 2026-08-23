@@ -838,7 +838,7 @@
           <div class="flex items-center justify-between">
             <div>
               <h2 class="text-2xl font-bold text-primary mb-1">Admin Control Center</h2>
-              <p class="text-sm text-on-surface-variant">Knowledge base ingestion, data uploads, and AI performance monitoring.</p>
+              <p class="text-sm text-on-surface-variant">Knowledge base ingestion, uploaded files, user management, and AI monitoring.</p>
             </div>
             <button onclick="triggerForceSync()" class="bg-primary text-white text-xs font-semibold px-4 py-2.5 rounded-full hover:bg-primary-container transition-all flex items-center gap-1.5 shadow-sm active:scale-95">
               <span class="material-symbols-outlined text-base">sync</span>
@@ -847,7 +847,7 @@
           </div>
 
           <!-- Stats Grid -->
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
             <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm">
               <div class="flex items-center gap-2 text-on-surface-variant mb-1">
                 <span class="material-symbols-outlined text-primary text-xl">dataset</span>
@@ -874,10 +874,22 @@
 
             <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm">
               <div class="flex items-center gap-2 text-on-surface-variant mb-1">
-                <span class="material-symbols-outlined text-[#2e7d32] text-xl">cloud_done</span>
-                <span class="text-xs uppercase tracking-wider font-semibold">Upload Status</span>
+                <span class="material-symbols-outlined text-primary text-xl">auto_stories</span>
+                <span class="text-xs uppercase tracking-wider font-semibold">Indexed Chunks</span>
               </div>
-              <div class="text-3xl font-extrabold text-[#2e7d32]">Synced</div>
+              <div id="stat-manual-chunks" class="text-3xl font-extrabold text-on-surface">43</div>
+              <div class="flex items-center gap-1 text-on-surface-variant text-xs mt-1">
+                <span class="material-symbols-outlined text-sm">menu_book</span>
+                <span>FAQ & HLO Manuals</span>
+              </div>
+            </div>
+
+            <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm">
+              <div class="flex items-center gap-2 text-on-surface-variant mb-1">
+                <span class="material-symbols-outlined text-[#2e7d32] text-xl">cloud_done</span>
+                <span class="text-xs uppercase tracking-wider font-semibold">Database Status</span>
+              </div>
+              <div class="text-3xl font-extrabold text-[#2e7d32]">Healthy</div>
               <div class="flex items-center gap-1 text-on-surface-variant text-xs mt-1">
                 <span class="material-symbols-outlined text-sm">update</span>
                 <span id="stat-last-sync">Last sync: Just now</span>
@@ -885,7 +897,113 @@
             </div>
           </div>
 
-          <!-- Alerts & Notices Management (Major Issue: admin-only create/delete) -->
+          <!-- Document Management & Uploads Bento Section -->
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <!-- Upload Excel Dropzone -->
+            <div class="lg:col-span-2 bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-base font-bold text-on-surface">Upload / Replace Excel Datasets</h3>
+                  <p class="text-xs text-on-surface-variant">Update All_Users.xlsx, HLB Allocation (2).xlsx, or HLB Description.xlsx.</p>
+                </div>
+              </div>
+              
+              <div onclick="document.getElementById('excel-file-input').click()"
+                class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer">
+                <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="hidden" onchange="handleExcelUpload(this)" />
+                <div class="w-12 h-12 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-2">
+                  <span class="material-symbols-outlined text-2xl">upload_file</span>
+                </div>
+                <p class="text-sm font-semibold text-on-surface">Click to upload Excel data</p>
+                <p class="text-xs text-on-surface-variant mt-0.5">Accepts .xlsx, .xls (Max 50MB)</p>
+              </div>
+            </div>
+
+            <!-- PDF Upload Dropzone -->
+            <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">Upload PDF Manual</h3>
+                <p class="text-xs text-on-surface-variant">Add new guideline manuals or FAQs.</p>
+              </div>
+
+              <div onclick="document.getElementById('pdf-file-input').click()"
+                class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer flex-1">
+                <input type="file" id="pdf-file-input" accept=".pdf" class="hidden" onchange="handlePdfUpload(this)" />
+                <div class="w-12 h-12 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-2">
+                  <span class="material-symbols-outlined text-2xl">picture_as_pdf</span>
+                </div>
+                <p class="text-sm font-semibold text-on-surface">Click to upload PDF</p>
+                <p class="text-xs text-on-surface-variant mt-0.5">Auto-chunked & Porter stemmed</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Uploaded Data Sources Table -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">Repository Data Sources</h3>
+                <p class="text-xs text-on-surface-variant">Active files currently ingested into the Census Assistant knowledge base.</p>
+              </div>
+              <button onclick="loadUploadedFiles()" class="text-xs text-primary font-semibold hover:underline flex items-center gap-1">
+                <span class="material-symbols-outlined text-base">refresh</span> Refresh Files
+              </button>
+            </div>
+            <div id="admin-uploaded-files-list" class="space-y-2">
+              <div class="flex justify-center p-4"><div class="loader-spinner-primary"></div></div>
+            </div>
+          </div>
+
+          <!-- User Management Section -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">Field User & Functionary Management</h3>
+                <p class="text-xs text-on-surface-variant">View all registered census enumerators and supervisors, or toggle active/disabled status.</p>
+              </div>
+              <div class="flex items-center gap-2">
+                <input id="admin-user-search-input" type="text" placeholder="Search functionary..." oninput="debounceAdminUserSearch()"
+                  class="px-3 py-1.5 rounded-lg border border-outline-variant bg-surface text-xs text-on-surface focus:border-primary outline-none" />
+              </div>
+            </div>
+
+            <div class="overflow-x-auto border border-outline-variant/20 rounded-xl">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-surface-container text-on-surface-variant font-semibold uppercase tracking-wider text-[10px]">
+                  <tr>
+                    <th class="p-3">User ID</th>
+                    <th class="p-3">Name</th>
+                    <th class="p-3">Role</th>
+                    <th class="p-3">Mobile</th>
+                    <th class="p-3">Jurisdiction</th>
+                    <th class="p-3">Status</th>
+                    <th class="p-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-users-table-body" class="divide-y divide-outline-variant/20 bg-surface">
+                  <tr><td colspan="7" class="p-4 text-center text-on-surface-variant">Loading user directory...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- AI Query Monitoring & Logs -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">AI Assistant Query Logs</h3>
+                <p class="text-xs text-on-surface-variant">Real-time inspection of field queries, intent classification, and system responses.</p>
+              </div>
+              <button onclick="loadAdminQueryLogs()" class="text-xs text-primary font-semibold hover:underline flex items-center gap-1">
+                <span class="material-symbols-outlined text-base">refresh</span> Refresh Logs
+              </button>
+            </div>
+            <div id="admin-query-logs-list" class="space-y-2 max-h-80 overflow-y-auto pr-1">
+              <div class="flex justify-center p-4"><div class="loader-spinner-primary"></div></div>
+            </div>
+          </div>
+
+          <!-- Alerts & Notices Management -->
           <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
             <div>
               <h3 class="text-base font-bold text-on-surface">Alerts & Notices Management</h3>
@@ -919,92 +1037,35 @@
             </div>
           </div>
 
-          <!-- File Uploads Bento Section -->
-          <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-
-            <!-- Excel Upload Dropzone -->
-            <div class="lg:col-span-2 bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
-              <h3 class="text-base font-bold text-on-surface">Upload / Replace Excel Files</h3>
-              <p class="text-xs text-on-surface-variant">Drag and drop institutional census data to update the knowledge base.</p>
-              
-              <div onclick="document.getElementById('excel-file-input').click()"
-                class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-8 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer">
-                <input type="file" id="excel-file-input" accept=".xlsx,.xls,.csv" class="hidden" onchange="handleExcelUpload(this)" />
-                <div class="w-14 h-14 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-3">
-                  <span class="material-symbols-outlined text-3xl">upload_file</span>
-                </div>
-                <p class="text-sm font-semibold text-on-surface">Click to upload or drag and drop</p>
-                <p class="text-xs text-on-surface-variant mt-0.5">All_Users.xlsx, HLB Allocation.xlsx (Max. 50MB)</p>
+          <!-- Knowledge Base Syncing & Engine Nodes -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm">
+            <h3 class="text-base font-bold text-on-surface mb-2">System Health & Engine Architecture</h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3">
+              <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
+                <p class="text-xs text-on-surface-variant font-medium">Indexing Engine</p>
+                <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
+                  <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Active (FTS5 + Porter)
+                </p>
+              </div>
+              <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
+                <p class="text-xs text-on-surface-variant font-medium">AI Model Provider</p>
+                <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
+                  <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Gemini 2.5 Flash / Local RAG
+                </p>
+              </div>
+              <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
+                <p class="text-xs text-on-surface-variant font-medium">WhatsApp Gateway</p>
+                <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
+                  <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Direct Deep-Link Active
+                </p>
+              </div>
+              <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
+                <p class="text-xs text-on-surface-variant font-medium">Database Layer</p>
+                <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
+                  <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> SQLite (WAL Mode)
+                </p>
               </div>
             </div>
-
-            <!-- PDF Manual Manager -->
-            <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
-              <h3 class="text-base font-bold text-on-surface">PDF Manual Management</h3>
-              <p class="text-xs text-on-surface-variant">Manage guideline manuals & SOPs.</p>
-
-              <div class="space-y-2">
-                <div class="flex items-center justify-between p-3 rounded-lg border border-outline-variant/30 bg-surface">
-                  <div class="flex items-center gap-2.5">
-                    <span class="material-symbols-outlined text-error text-xl">picture_as_pdf</span>
-                    <div>
-                      <p class="text-xs font-bold text-on-surface">FAQ (E & S).pdf</p>
-                      <p class="text-[10px] text-on-surface-variant">191 KB • 9 Pages</p>
-                    </div>
-                  </div>
-                  <span class="text-[11px] font-semibold text-[#2e7d32]">Active</span>
-                </div>
-
-                <div class="flex items-center justify-between p-3 rounded-lg border border-outline-variant/30 bg-surface">
-                  <div class="flex items-center gap-2.5">
-                    <span class="material-symbols-outlined text-error text-xl">picture_as_pdf</span>
-                    <div>
-                      <p class="text-xs font-bold text-on-surface">HLO_Manual_English.pdf</p>
-                      <p class="text-[10px] text-on-surface-variant">97 MB • 136 Pages</p>
-                    </div>
-                  </div>
-                  <span class="text-[11px] font-semibold text-[#2e7d32]">Active</span>
-                </div>
-              </div>
-
-              <button onclick="document.getElementById('pdf-file-input').click()" class="mt-auto w-full py-2.5 px-4 border border-primary text-primary rounded-full text-xs font-semibold hover:bg-primary-fixed/40 transition-all flex items-center justify-center gap-1.5 active:scale-95">
-                <input type="file" id="pdf-file-input" accept=".pdf" class="hidden" onchange="handlePdfUpload(this)" />
-                <span class="material-symbols-outlined text-base">add</span>
-                <span>Upload New PDF</span>
-              </button>
-            </div>
-
-            <!-- Sync Health Status -->
-            <div class="lg:col-span-3 bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm">
-              <h3 class="text-base font-bold text-on-surface mb-2">Knowledge Base Syncing & Engine Nodes</h3>
-              <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3">
-                <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
-                  <p class="text-xs text-on-surface-variant font-medium">Indexing Engine</p>
-                  <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
-                    <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Active (FTS5 + Vector)
-                  </p>
-                </div>
-                <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
-                  <p class="text-xs text-on-surface-variant font-medium">AI Model Provider</p>
-                  <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
-                    <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Gemini 2.5 Flash
-                  </p>
-                </div>
-                <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
-                  <p class="text-xs text-on-surface-variant font-medium">WhatsApp Gateway</p>
-                  <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
-                    <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> Deep-Link + Cloud API
-                  </p>
-                </div>
-                <div class="bg-surface p-3 rounded-xl border border-outline-variant/30">
-                  <p class="text-xs text-on-surface-variant font-medium">Database Layer</p>
-                  <p class="text-sm font-bold text-on-surface flex items-center gap-1 mt-1">
-                    <span class="w-2 h-2 rounded-full bg-[#2e7d32]"></span> SQLite / Supabase Ready
-                  </p>
-                </div>
-              </div>
-            </div>
-
           </div>
         </section>
 

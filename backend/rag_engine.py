@@ -106,14 +106,20 @@ def _lookup_area_for_user(cursor, user_id):
 def detect_intent(query: str) -> str:
     """Classify user query intent."""
     q = query.lower()
-    
+
     # HLB (formerly "EB") or Enumerator / Record lookup. The "eb" alias is
     # still recognized so old queries/links keep working, but every
     # response now speaks in HLB terms only. Also explicitly recognizes the
     # literal phrasing the search result card's ">" (chevron) button sends —
     # "Show details for <name>" — so opening a profile always resolves to a
     # person record instead of falling through to a generic manual answer.
-    if re.search(r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|who is in charge|show details for|details for|profile of)\b', q):
+    # Extended to also catch area/village/circle lookups.
+    if re.search(
+        r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|'
+        r'who is in charge|show details for|details for|profile of|'
+        r'find enumerator|who works in|circle\s*\d+|supervisory circle\s*\d+|'
+        r'area|village|ward|locality)\b', q
+    ):
         return INTENT_RECORD_SEARCH
 
     # Supervisor specific query. Note: "S. A. Ahmed" is NOT a supervisor —
@@ -121,12 +127,74 @@ def detect_intent(query: str) -> str:
     # deliberately excluded from this trigger.
     if re.search(r'\b(supervisor|zonal supervisor|circle supervisor|supervisory circle)\b', q) and not re.search(r'\b(duty|duties|role|guideline|manual|rule)\b', q):
         return INTENT_SUPERVISOR_QUERY
-        
+
     # Manual, Guidelines, Procedures, Definitions
     if re.search(r'\b(manual|guideline|rule|procedure|duty|duties|definition|criteria|form\s*\d+[a-z]?|household|building|census house|how to|faq)\b', q):
         return INTENT_MANUAL_SEARCH
-        
+
     return INTENT_GENERAL
+
+def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Search hlb_descriptions for village/ward/area name matches, then look up
+    the enumerator assigned to each matching HLB. Returns functionary-style
+    result dicts so they can be merged with the main record_results list.
+    """
+    clean_words = _clean_keywords(query)
+    if not clean_words:
+        return []
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    results = []
+
+    # Search for area/village names matching any keyword
+    for word in clean_words[:3]:
+        rows = cursor.execute("""
+            SELECT hlb_no, village_ward_name, landmark, boundary_description
+            FROM hlb_descriptions
+            WHERE village_ward_name LIKE ? OR landmark LIKE ? OR boundary_description LIKE ?
+            LIMIT ?
+        """, (f"%{word}%", f"%{word}%", f"%{word}%", limit)).fetchall()
+
+        for desc_row in rows:
+            hlb_norm = desc_row["hlb_no"]
+            area_name = desc_row["landmark"] or re.sub(r'\s*\(\d+\)\s*$', '', desc_row["village_ward_name"] or "").strip()
+
+            # Find the enumerator assigned to this HLB
+            alloc_row = cursor.execute("""
+                SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district
+                FROM hlb_allocations h
+                LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+                WHERE h.hlb_no = ? OR h.hlb_no = ?
+                LIMIT 1
+            """, (hlb_norm, hlb_norm.zfill(4))).fetchone()
+
+            if alloc_row and not any(r.get("hlb_no") == alloc_row["hlb_no"] for r in results):
+                maps_url = "https://www.google.com/maps/search/?api=1&query=" + url_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India") if area_name else None
+                results.append({
+                    "type": "hlb_allocation",
+                    "hlb_no": alloc_row["hlb_no"],
+                    "circle_no": alloc_row["supervisory_circle_no"],
+                    "supervisor_name": alloc_row["supervisor_name"],
+                    "enumerator_name": alloc_row["enumerator_name"],
+                    "enumerator_user_id": alloc_row["enumerator_user_id"],
+                    "allotment_date": alloc_row["allotment_date"],
+                    "mobile": alloc_row.get("enum_mobile") or "+91 84534 41975",
+                    "district": alloc_row.get("district") or "Goalpara",
+                    "area_name": area_name,
+                    "maps_url": maps_url,
+                    "confidence": "high",
+                    "source": "Census Record DB - 2024 (HLB Description)"
+                })
+
+            if len(results) >= limit:
+                break
+        if len(results) >= limit:
+            break
+
+    conn.close()
+    return results
 
 def search_structured_records(query: str, limit: int = 5, strict: bool = False) -> List[Dict[str, Any]]:
     """
@@ -178,7 +246,38 @@ def search_structured_records(query: str, limit: int = 5, strict: bool = False) 
                 "source": "Census Record DB - 2024 (HLB Allocation)"
             })
 
-    # 2. Check for Name or Mobile or User ID in functionaries.
+    # 2. Check for supervisory circle number (e.g. "Circle 3" or "Circle No. 2")
+    circle_match = re.search(r'\b(?:circle|supervisory circle|circle no\.?)\s*#?\s*(\d+)\b', query, re.IGNORECASE)
+    if circle_match and not eb_match:
+        circle_num = circle_match.group(1)
+        cursor.execute("""
+            SELECT h.*, f.mobile_number as enum_mobile, f.district, f.sub_district
+            FROM hlb_allocations h
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            WHERE h.supervisory_circle_no = ? OR h.supervisory_circle_no = ?
+            LIMIT ?
+        """, (circle_num, circle_num.zfill(2), limit))
+        for row in cursor.fetchall():
+            if any(r.get("hlb_no") == row["hlb_no"] for r in results):
+                continue
+            area_name, maps_url = _lookup_area_for_hlb(cursor, row["hlb_no"])
+            results.append({
+                "type": "hlb_allocation",
+                "hlb_no": row["hlb_no"],
+                "circle_no": row["supervisory_circle_no"],
+                "supervisor_name": row["supervisor_name"],
+                "enumerator_name": row["enumerator_name"],
+                "enumerator_user_id": row["enumerator_user_id"],
+                "allotment_date": row["allotment_date"],
+                "mobile": row.get("enum_mobile") or "+91 84534 41975",
+                "district": row.get("district") or "Goalpara",
+                "area_name": area_name,
+                "maps_url": maps_url,
+                "confidence": "high",
+                "source": "Census Record DB - 2024 (HLB Allocation)"
+            })
+
+    # 3. Check for Name or Mobile or User ID in functionaries.
     #
     # Precision strategy (this replaced a much weaker OR-only match that was
     # returning the WRONG person for multi-word name queries — e.g. "Show
@@ -391,7 +490,14 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         # typed a plain name with no other context), so search strictly to
         # avoid a random word in the question spuriously matching a person.
         record_results = search_structured_records(query, limit=5, strict=(intent == INTENT_GENERAL))
-    
+
+        # For RECORD_SEARCH with area/village keywords but no results yet,
+        # also try the area-based search against hlb_descriptions.
+        if intent == INTENT_RECORD_SEARCH and not record_results:
+            area_keywords = ["area", "village", "ward", "locality", "circle"]
+            if any(kw in query.lower() for kw in area_keywords):
+                record_results = search_by_area(query, limit=5)
+
     if intent in [INTENT_MANUAL_SEARCH, INTENT_GENERAL] or not record_results:
         manual_results = search_manual_chunks(query, limit=3)
 

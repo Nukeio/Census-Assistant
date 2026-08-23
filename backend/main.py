@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from .database import get_db_connection, init_database
+from .database import get_db_connection, init_database, DB_PATH
 from .ingestion import run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query
@@ -29,6 +29,9 @@ CIRCLE_NAME = os.environ.get("CIRCLE_NAME", "Lakhipur Circle")
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
+
+ALLOWED_EXCEL_EXTENSIONS = {".xlsx", ".xls"}
+ALLOWED_PDF_EXTENSIONS = {".pdf"}
 
 logger = logging.getLogger("CensusServer")
 logging.basicConfig(level=logging.INFO)
@@ -77,9 +80,7 @@ def health_check():
     """
     Lightweight, unauthenticated liveness probe. The Android app calls this
     on every launch to decide whether to load the live backend or fall back
-    to its bundled offline copy — it must NEVER require admin auth (or any
-    auth at all), otherwise every guest/functionary launch would look like
-    the backend is down and get stuck on stale offline content.
+    to its bundled offline copy.
     """
     return jsonify({"status": "ok"})
 
@@ -135,36 +136,29 @@ def chat_endpoint():
 
 # ----------------- Census Records Search Endpoints -----------------
 def _hlb_no_norm(hlb_no):
-    """Normalize an HLB number to a plain numeric string (strips leading
-    zeros / non-digits) so lookups work regardless of how a given sheet
-    padded the number (e.g. '0001' vs '1')."""
+    """Normalize an HLB number to a plain numeric string."""
     if hlb_no is None:
         return None
     digits = re.sub(r'\D', '', str(hlb_no))
     return str(int(digits)) if digits else str(hlb_no).strip()
 
-def _area_info(hlb_no, circle_no=None):
+def _area_info(hlb_no, circle_no=None, conn=None):
     """
-    "Allocated area" label + Google Maps link. Prefers the real village/ward
-    name from HLB Description.xlsx (ingested into hlb_descriptions) when we
-    have an HLB number to look it up — this is block-precise. Falls back to
-    a Supervisory-Circle-level approximation (real but not block-precise)
-    when no HLB number is given or it isn't found in that sheet, since
-    All_Users.xlsx / HLB Allocation.xlsx alone don't carry village/area names.
+    Allocated area label + Google Maps link.
     """
     norm = _hlb_no_norm(hlb_no)
+    close_conn = False
     if norm:
-        conn = get_db_connection()
+        if conn is None:
+            conn = get_db_connection()
+            close_conn = True
         row = conn.execute(
             "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
             (norm,)
         ).fetchone()
-        conn.close()
+        if close_conn:
+            conn.close()
         if row and (row["landmark"] or row["village_ward_name"]):
-            # Prefer "landmark" — it's the same village/ward name without the
-            # redundant trailing "(0001)"-style HLB code that
-            # village_ward_name carries, so it reads cleaner and geocodes
-            # slightly better on Google Maps.
             village_name = row["landmark"] or re.sub(r'\s*\(\d+\)\s*$', '', row["village_ward_name"]).strip()
             maps_url = "https://www.google.com/maps/search/?api=1&query=" + \
                 requests_quote(f"{village_name}, {CIRCLE_NAME}, Assam, India")
@@ -180,9 +174,9 @@ def _area_info(hlb_no, circle_no=None):
 @app.route("/api/records/search", methods=["GET"])
 def records_search():
     q = request.args.get("q", "").strip()
-    filter_by = request.args.get("filter", "all") # 'all', 'name', 'mobile', 'id', 'hlb'
+    filter_by = request.args.get("filter", "all") # 'all', 'name', 'mobile', 'id', 'hlb', 'circle'
     if filter_by == "eb":
-        filter_by = "hlb"  # accept the old filter value for backward compatibility
+        filter_by = "hlb"
     page = int(request.args.get("page", 1))
     limit = int(request.args.get("limit", 15))
     offset = (page - 1) * limit
@@ -190,84 +184,144 @@ def records_search():
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    if filter_by == "hlb":
+        # Search HLB allocation directly with a COUNT for proper pagination
+        count_cursor = conn.cursor()
+        count_cursor.execute("""
+            SELECT COUNT(*) FROM hlb_allocations h
+            WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
+        """, (f"%{q}%", f"%{q}%"))
+        total = count_cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT h.*, f.mobile_number, f.district, f.sub_district, d.village_ward_name, d.landmark
+            FROM hlb_allocations h
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
+            WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
+            ORDER BY h.id ASC
+            LIMIT ? OFFSET ?
+        """, (f"%{q}%", f"%{q}%", limit, offset))
+        hlb_rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        results = []
+        for r in hlb_rows:
+            area_name = r.get("landmark") or (re.sub(r'\s*\(\d+\)\s*$', '', r.get("village_ward_name") or '').strip()) if r.get("village_ward_name") else None
+            maps_url = ("https://www.google.com/maps/search/?api=1&query=" + requests_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
+            results.append({
+                "id": r["id"],
+                "name": r["enumerator_name"],
+                "role": f"Enumerator (HLB {r['hlb_no']})",
+                "user_id": r["enumerator_user_id"],
+                "mobile": r.get("mobile_number") or "",
+                "hlb_number": r["hlb_no"],
+                "supervisor": r["supervisor_name"],
+                "circle": r["supervisory_circle_no"],
+                "allotment_date": r["allotment_date"],
+                "area_name": area_name,
+                "maps_url": maps_url
+            })
+        return jsonify({
+            "query": q,
+            "filter": filter_by,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "results": results
+        })
+
+    elif filter_by == "circle":
+        # Search by supervisory circle
+        circle_clean = re.sub(r'\D', '', q) or q
+        count_cursor = conn.cursor()
+        count_cursor.execute("""
+            SELECT COUNT(*) FROM hlb_allocations h
+            WHERE h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?
+        """, (f"%{q}%", circle_clean))
+        total = count_cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT h.*, f.mobile_number, f.district, f.sub_district, d.village_ward_name, d.landmark
+            FROM hlb_allocations h
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
+            WHERE h.supervisory_circle_no LIKE ? OR h.supervisory_circle_no = ?
+            ORDER BY h.id ASC
+            LIMIT ? OFFSET ?
+        """, (f"%{q}%", circle_clean, limit, offset))
+        hlb_rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        results = []
+        for r in hlb_rows:
+            area_name = r.get("landmark") or (re.sub(r'\s*\(\d+\)\s*$', '', r.get("village_ward_name") or '').strip()) if r.get("village_ward_name") else None
+            maps_url = ("https://www.google.com/maps/search/?api=1&query=" + requests_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
+            results.append({
+                "id": r["id"],
+                "name": r["enumerator_name"],
+                "role": f"Enumerator (HLB {r['hlb_no']})",
+                "user_id": r["enumerator_user_id"],
+                "mobile": r.get("mobile_number") or "",
+                "hlb_number": r["hlb_no"],
+                "supervisor": r["supervisor_name"],
+                "circle": r["supervisory_circle_no"],
+                "allotment_date": r["allotment_date"],
+                "area_name": area_name,
+                "maps_url": maps_url
+            })
+        return jsonify({
+            "query": q,
+            "filter": filter_by,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "results": results
+        })
+
+    # Standard functionary search with single LEFT JOIN to avoid N+1 query overhead
     where_clauses = []
     params = []
 
     if q:
         if filter_by == "name":
-            where_clauses.append("name LIKE ?")
+            where_clauses.append("f.name LIKE ?")
             params.append(f"%{q}%")
         elif filter_by == "mobile":
-            where_clauses.append("mobile_number LIKE ?")
+            where_clauses.append("f.mobile_number LIKE ?")
             params.append(f"%{q}%")
         elif filter_by == "id":
-            where_clauses.append("user_id LIKE ?")
+            where_clauses.append("f.user_id LIKE ?")
             params.append(f"%{q}%")
-        elif filter_by == "hlb":
-            # Search the HLB allocation sheet directly, joined back to the
-            # functionaries sheet for the enumerator's mobile number.
-            cursor.execute("""
-                SELECT h.*, f.mobile_number, f.district, f.sub_district
-                FROM hlb_allocations h
-                LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
-                WHERE h.hlb_no LIKE ? OR h.supervisory_circle_no LIKE ?
-                LIMIT ? OFFSET ?
-            """, (f"%{q}%", f"%{q}%", limit, offset))
-            hlb_rows = [dict(r) for r in cursor.fetchall()]
-            conn.close()
-            results = []
-            for r in hlb_rows:
-                area_name, maps_url = _area_info(r["hlb_no"], r["supervisory_circle_no"])
-                results.append({
-                    "id": r["id"],
-                    "name": r["enumerator_name"],
-                    "role": f"Enumerator (HLB {r['hlb_no']})",
-                    "user_id": r["enumerator_user_id"],
-                    "mobile": r.get("mobile_number") or "",
-                    "hlb_number": r["hlb_no"],
-                    "supervisor": r["supervisor_name"],
-                    "circle": r["supervisory_circle_no"],
-                    "allotment_date": r["allotment_date"],
-                    "area_name": area_name,
-                    "maps_url": maps_url
-                })
-            return jsonify({
-                "query": q,
-                "filter": filter_by,
-                "page": page,
-                "results": results,
-                "total": len(hlb_rows)
-            })
         else:
-            where_clauses.append("(name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ? OR functionary_type LIKE ?)")
-            params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+            where_clauses.append("(f.name LIKE ? OR f.user_id LIKE ? OR f.mobile_number LIKE ? OR f.functionary_type LIKE ? OR f.village_town LIKE ?)")
+            params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    cursor.execute(f"SELECT COUNT(*) FROM functionaries {where_sql}", params)
+    cursor.execute(f"SELECT COUNT(*) FROM functionaries f {where_sql}", params)
     total = cursor.fetchone()[0]
 
     cursor.execute(f"""
-        SELECT * FROM functionaries {where_sql}
-        ORDER BY id ASC
+        SELECT f.*, h.hlb_no, h.supervisor_name, h.supervisory_circle_no, d.village_ward_name, d.landmark
+        FROM functionaries f
+        LEFT JOIN hlb_allocations h ON f.user_id = h.enumerator_user_id
+        LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
+        {where_sql}
+        ORDER BY f.id ASC
         LIMIT ? OFFSET ?
     """, params + [limit, offset])
-    rows = cursor.fetchall()
+    rows = [dict(r) for r in cursor.fetchall()]
 
     results = []
     for r in rows:
-        # Cross-reference the functionary against the HLB allocation sheet
-        # (matched on Enumerator User ID) to pull the HLB number, supervisor
-        # name, and circle it's tied to.
-        cursor.execute("""
-            SELECT hlb_no, supervisor_name, supervisory_circle_no
-            FROM hlb_allocations WHERE enumerator_user_id = ? LIMIT 1
-        """, (r["user_id"],))
-        hlb_match = cursor.fetchone()
-        hlb_no = hlb_match["hlb_no"] if hlb_match else None
-        sup_str = hlb_match["supervisor_name"] if hlb_match else None
-        circle_no = hlb_match["supervisory_circle_no"] if hlb_match else None
-        area_name, maps_url = _area_info(hlb_no, circle_no)
+        hlb_no = r["hlb_no"]
+        sup_str = r["supervisor_name"]
+        circle_no = r["supervisory_circle_no"]
+        area_name = r.get("landmark") or (re.sub(r'\s*\(\d+\)\s*$', '', r.get("village_ward_name") or '').strip()) if r.get("village_ward_name") else None
+        if not area_name and r.get("village_town"):
+            area_name = r["village_town"]
+        maps_url = ("https://www.google.com/maps/search/?api=1&query=" + requests_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
 
         results.append({
             "id": r["id"],
@@ -297,10 +351,7 @@ def records_search():
 
 @app.route("/api/records/supervisor", methods=["GET"])
 def supervisor_list():
-    """List actual supervisors from the functionaries sheet (not a single
-    hardcoded profile), each with their circle(s) and how many HLBs/enumerators
-    report to them per the HLB allocation sheet — the two source sheets
-    joined on supervisor name."""
+    """List actual supervisors cross-referenced from functionaries and hlb_allocations."""
     q = request.args.get("q", "").strip()
     limit = int(request.args.get("limit", 30))
 
@@ -324,7 +375,7 @@ def supervisor_list():
             SELECT DISTINCT supervisory_circle_no FROM hlb_allocations
             WHERE supervisor_name = ? OR supervisor_name LIKE ?
         """, (r["name"], f"%{r['name']}%"))
-        circles = [c["supervisory_circle_no"] for c in cursor.fetchall()]
+        circles = [c["supervisory_circle_no"] for c in cursor.fetchall() if c["supervisory_circle_no"]]
 
         cursor.execute("""
             SELECT COUNT(*) FROM hlb_allocations
@@ -332,7 +383,7 @@ def supervisor_list():
         """, (r["name"], f"%{r['name']}%"))
         hlb_count = cursor.fetchone()[0]
 
-        area_name, maps_url = _area_info(None, circles[0] if circles else None)
+        area_name, maps_url = _area_info(None, circles[0] if circles else None, conn=conn)
         supervisors.append({
             "name": r["name"],
             "user_id": r["user_id"],
@@ -465,7 +516,7 @@ def admin_stats():
     cursor.execute("SELECT COUNT(*), AVG(latency_ms) FROM ai_usage_stats")
     ai_stat = cursor.fetchone()
     total_ai_queries = ai_stat[0] or 0
-    avg_latency = round(ai_stat[1] or 1.2, 1)
+    avg_latency = round((ai_stat[1] or 1200) / 1000, 1)
 
     cursor.execute("SELECT value FROM system_settings WHERE key = 'last_sync_time'")
     last_sync_row = cursor.fetchone()
@@ -512,10 +563,14 @@ def upload_excel():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_EXCEL_EXTENSIONS:
+        return jsonify({"error": f"Invalid file type '{ext}'. Only Excel files (.xlsx, .xls) are allowed."}), 400
+
     target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
-    # Ingest based on filename
+    # Ingest based on filename keywords
     if "user" in filename.lower():
         cnt = ingest_all_users(target_path)
     elif "description" in filename.lower():
@@ -541,6 +596,10 @@ def upload_pdf():
         return jsonify({"error": "No selected file"}), 400
 
     filename = secure_filename(file.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_PDF_EXTENSIONS:
+        return jsonify({"error": f"Invalid file type '{ext}'. Only PDF files (.pdf) are allowed."}), 400
+
     target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
@@ -556,12 +615,190 @@ def admin_logs():
     if admin_error:
         return admin_error
 
+    page = int(request.args.get("page", 1))
+    limit = int(request.args.get("limit", 25))
+    offset = (page - 1) * limit
+
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT 20")
+    cursor.execute("SELECT COUNT(*) FROM activity_logs")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("SELECT * FROM activity_logs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))
     logs = [dict(r) for r in cursor.fetchall()]
     conn.close()
-    return jsonify({"logs": logs})
+    return jsonify({"logs": logs, "total": total, "page": page, "limit": limit})
+
+@app.route("/api/admin/query-logs", methods=["GET"])
+def admin_query_logs():
+    """Detailed AI query log with performance metrics."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    page = int(request.args.get("page", 1))
+    limit = int(request.args.get("limit", 25))
+    offset = (page - 1) * limit
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM activity_logs WHERE action_type = 'ai_chat' OR action_type = 'ai_query'")
+    total = cursor.fetchone()[0]
+
+    cursor.execute("""
+        SELECT a.id, a.user_id, a.query_text, a.source_tag, a.timestamp
+        FROM activity_logs a
+        WHERE a.action_type = 'ai_chat' OR a.action_type = 'ai_query'
+        ORDER BY a.id DESC LIMIT ? OFFSET ?
+    """, (limit, offset))
+    logs = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify({"query_logs": logs, "total": total, "page": page, "limit": limit})
+
+@app.route("/api/admin/system-health", methods=["GET"])
+def system_health():
+    """System health inspection endpoint with DB stats, file sizes, and chunk breakdown."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Table counts
+    counts = {}
+    for table in ["functionaries", "hlb_allocations", "hlb_descriptions", "manual_chunks", "notifications", "activity_logs", "ai_usage_stats"]:
+        try:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            counts[table] = cursor.fetchone()[0]
+        except Exception:
+            counts[table] = 0
+
+    # Chunks by source file
+    cursor.execute("""
+        SELECT source_file, doc_title, COUNT(*) as chunk_count, MAX(page_number) as max_page
+        FROM manual_chunks
+        GROUP BY source_file
+    """)
+    doc_breakdown = [dict(r) for r in cursor.fetchall()]
+
+    conn.close()
+
+    # Database file size
+    db_size_bytes = os.path.getsize(DB_PATH) if os.path.exists(DB_PATH) else 0
+    db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
+
+    return jsonify({
+        "status": "healthy",
+        "database_path": DB_PATH,
+        "database_size_mb": db_size_mb,
+        "table_counts": counts,
+        "document_breakdown": doc_breakdown,
+        "server_time": datetime.now().isoformat()
+    })
+
+@app.route("/api/admin/users", methods=["GET"])
+def admin_users_list():
+    """Paginated functionary management endpoint."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    q = request.args.get("q", "").strip()
+    page = int(request.args.get("page", 1))
+    limit = int(request.args.get("limit", 20))
+    offset = (page - 1) * limit
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    where_sql = ""
+    params = []
+    if q:
+        where_sql = "WHERE name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ? OR functionary_type LIKE ?"
+        params = [f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"]
+
+    cursor.execute(f"SELECT COUNT(*) FROM functionaries {where_sql}", params)
+    total = cursor.fetchone()[0]
+
+    cursor.execute(f"""
+        SELECT id, sno, user_id, functionary_type, name, mobile_number, district, sub_district, village_town, status, updated_at
+        FROM functionaries {where_sql}
+        ORDER BY id ASC LIMIT ? OFFSET ?
+    """, params + [limit, offset])
+    users = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    return jsonify({"users": users, "total": total, "page": page, "limit": limit})
+
+@app.route("/api/admin/users/<user_id>/toggle-status", methods=["POST"])
+def admin_toggle_user_status(user_id):
+    """Toggle user status between ACTIVE and DISABLED."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM functionaries WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"success": False, "error": "Functionary not found."}), 404
+
+    new_status = "DISABLED" if row["status"] == "ACTIVE" else "ACTIVE"
+    cursor.execute("UPDATE functionaries SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", (new_status, user_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"success": True, "user_id": user_id, "new_status": new_status})
+
+@app.route("/api/admin/uploaded-files", methods=["GET"])
+def admin_uploaded_files():
+    """List Excel and PDF data sources present in ROOT_DIR."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    files = []
+    target_exts = {".xlsx", ".xls", ".pdf"}
+    for fname in os.listdir(ROOT_DIR):
+        ext = os.path.splitext(fname)[1].lower()
+        if ext in target_exts:
+            full_path = os.path.join(ROOT_DIR, fname)
+            stat = os.stat(full_path)
+            size_kb = round(stat.st_size / 1024, 1)
+            size_str = f"{round(size_kb / 1024, 1)} MB" if size_kb >= 1024 else f"{size_kb} KB"
+            files.append({
+                "filename": fname,
+                "file_type": "PDF Manual" if ext == ".pdf" else "Excel Sheet",
+                "size_str": size_str,
+                "size_bytes": stat.st_size,
+                "last_modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+    return jsonify({"files": files})
+
+@app.route("/api/admin/uploaded-files/<filename>", methods=["DELETE"])
+def admin_delete_file(filename):
+    """Delete an uploaded source file and trigger re-index."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    safe_name = secure_filename(filename)
+    full_path = os.path.join(ROOT_DIR, safe_name)
+    if not os.path.exists(full_path):
+        return jsonify({"success": False, "error": "File does not exist."}), 404
+
+    try:
+        os.remove(full_path)
+        # Trigger re-index
+        run_full_ingestion()
+        return jsonify({"success": True, "message": f"File {safe_name} deleted and knowledge base updated."})
+    except Exception as e:
+        logger.error(f"File delete error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ----------------- Messaging & Webhook Endpoints -----------------
 @app.route("/api/channels/status", methods=["GET"])

@@ -62,11 +62,11 @@ def ingest_all_users(filepath: str = None) -> int:
         row_id = cursor.lastrowid
         try:
             cursor.execute("""
-                INSERT INTO functionaries_fts (rowid, user_id, functionary_type, name, mobile_number, district, sub_district)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (row_id, user_id, func_type, name, mobile, district, sub_district))
-        except Exception:
-            pass
+                INSERT INTO functionaries_fts (rowid, user_id, functionary_type, name, mobile_number, district, sub_district, village_town)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (row_id, user_id, func_type, name, mobile, district, sub_district, village_town))
+        except Exception as e:
+            logger.debug(f"FTS insert note: {e}")
 
         inserted += 1
 
@@ -110,7 +110,7 @@ def ingest_hlb_allocation(filepath: str = None) -> int:
         allot_date = str(row[5]).strip() if len(row) > 5 and row[5] is not None else ""
 
         cursor.execute("""
-            INSERT INTO hlb_allocations 
+            INSERT OR REPLACE INTO hlb_allocations 
             (supervisory_circle_no, hlb_no, supervisor_name, enumerator_name, enumerator_user_id, allotment_date)
             VALUES (?, ?, ?, ?, ?, ?)
         """, (circle_no, hlb_no, sup_name, enum_name, enum_user_id, allot_date))
@@ -135,12 +135,7 @@ def ingest_hlb_allocation(filepath: str = None) -> int:
 def ingest_hlb_description(filepath: str = None) -> int:
     """
     Ingest 'HLB Description.xlsx' (columns: HLB No., Village/Ward name and code,
-    Landmark, HLB Description) into hlb_descriptions. This is the sheet that
-    finally carries a REAL village/ward name per HLB — before this, main.py's
-    _area_info() could only approximate location at the Supervisory Circle
-    level because neither All_Users.xlsx nor HLB Allocation (2).xlsx has a
-    usable village/area name. This table lets Google Maps links and the
-    "allocated area" shown in search results be block-precise instead.
+    Landmark, HLB Description) into hlb_descriptions.
     """
     if not filepath:
         filepath = os.path.join(ROOT_DIR, "HLB Description.xlsx")
@@ -165,9 +160,6 @@ def ingest_hlb_description(filepath: str = None) -> int:
         hlb_no = str(hlb_no_raw).strip()
         if not hlb_no:
             continue
-        # Normalize to a plain numeric string (strip leading zeros / non-digits)
-        # so this joins cleanly against hlb_allocations.hlb_no regardless of
-        # whether that sheet zero-pads the number (e.g. "0001") or not ("1").
         digits = re.sub(r'\D', '', hlb_no)
         hlb_no_norm = str(int(digits)) if digits else hlb_no
 
@@ -176,7 +168,7 @@ def ingest_hlb_description(filepath: str = None) -> int:
         description = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
 
         cursor.execute("""
-            INSERT INTO hlb_descriptions (hlb_no, village_ward_name, landmark, boundary_description)
+            INSERT OR REPLACE INTO hlb_descriptions (hlb_no, village_ward_name, landmark, boundary_description)
             VALUES (?, ?, ?, ?)
         """, (hlb_no_norm, village_ward, landmark, description))
         inserted += 1
@@ -246,7 +238,8 @@ def ingest_pdf_manuals() -> int:
                     if header_match:
                         current_header = header_match.group(0)
 
-                    if len(current_chunk) + len(p) < 800:
+                    # Keep chunk within 800 chars, but if a question starts, keep it intact
+                    if len(current_chunk) + len(p) < 800 and not (current_chunk and header_match):
                         current_chunk += ("\n\n" + p) if current_chunk else p
                     else:
                         if current_chunk.strip():
@@ -264,6 +257,8 @@ def ingest_pdf_manuals() -> int:
                                 pass
                             total_chunks += 1
                         current_chunk = p
+                        if header_match:
+                            current_header = header_match.group(0)
 
                 if current_chunk.strip():
                     cursor.execute("""
@@ -293,6 +288,12 @@ def ingest_pdf_manuals() -> int:
         INSERT OR REPLACE INTO system_settings (key, value, updated_at)
         VALUES ('last_sync_time', ?, CURRENT_TIMESTAMP)
     """, (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),))
+
+    # Update manual_fts_last_chunk_count setting so DB init doesn't need to rebuild FTS immediately
+    cursor.execute("""
+        INSERT INTO system_settings(key, value) VALUES('manual_fts_last_chunk_count', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+    """, (str(total_chunks),))
 
     conn.commit()
     conn.close()

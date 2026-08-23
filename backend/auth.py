@@ -6,9 +6,10 @@ Handles Guest Access, OTP Mobile Verification for Field Functionaries, and Admin
 import os
 import time
 import hashlib
+import hmac
 import random
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import jwt
 from .database import get_db_connection
 
@@ -31,8 +32,66 @@ JWT_EXPIRATION_HOURS = 72
 # mobile number without ever receiving an SMS.
 DEV_OTP_BYPASS = os.environ.get("DEV_OTP_BYPASS", "false").lower() in ("1", "true", "yes")
 
-# In-memory OTP store: mobile -> {otp, expires_at}
+# In-memory OTP store: mobile -> {otp, expires_at, request_count, window_start}
+# Added request_count and window_start for rate-limiting (max 3 requests per mobile per 5 minutes).
 OTP_STORE: Dict[str, Dict[str, Any]] = {}
+
+OTP_RATE_MAX = 3          # Maximum OTP requests per mobile per window
+OTP_RATE_WINDOW = 300     # Window duration in seconds (5 minutes)
+
+# ---------------------------------------------------------------------------
+# PBKDF2 password hashing (replaces plain SHA-256 with no salt)
+# ---------------------------------------------------------------------------
+PBKDF2_ITERATIONS = 260_000
+PBKDF2_HASH = "sha256"
+
+def hash_password(password: str, salt: Optional[str] = None) -> str:
+    """
+    Produce a PBKDF2-SHA256 hash of *password* in the format:
+        pbkdf2$sha256$<iterations>$<hex_salt>$<hex_digest>
+    If *salt* is not supplied, a random 16-byte salt is generated.
+    Returns the full self-describing string so the hash and its parameters
+    travel together and can be verified without any out-of-band state.
+    """
+    if salt is None:
+        salt = os.urandom(16).hex()
+    dk = hashlib.pbkdf2_hmac(
+        PBKDF2_HASH,
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PBKDF2_ITERATIONS,
+    )
+    return f"pbkdf2${PBKDF2_HASH}${PBKDF2_ITERATIONS}${salt}${dk.hex()}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """
+    Verify *password* against a stored hash string.
+    Supports both the new 'pbkdf2$...' format and the legacy plain SHA-256
+    hex digest (so old rows in the DB keep working until they are re-seeded).
+    Uses hmac.compare_digest throughout to prevent timing attacks.
+    """
+    if stored_hash.startswith("pbkdf2$"):
+        try:
+            _, alg, iters_str, salt, expected_dk = stored_hash.split("$")
+            iters = int(iters_str)
+            dk = hashlib.pbkdf2_hmac(
+                alg,
+                password.encode("utf-8"),
+                salt.encode("utf-8"),
+                iters,
+            )
+            return hmac.compare_digest(dk.hex(), expected_dk)
+        except Exception as e:
+            logger.error(f"PBKDF2 verification error: {e}")
+            return False
+    else:
+        # Legacy SHA-256 path — kept only for backward compatibility
+        legacy_hash = hashlib.sha256(password.encode()).hexdigest()
+        return hmac.compare_digest(legacy_hash, stored_hash)
+
+# ---------------------------------------------------------------------------
+# JWT helpers
+# ---------------------------------------------------------------------------
 
 def generate_jwt_token(user_data: Dict[str, Any]) -> str:
     """Generate signed JWT token."""
@@ -56,6 +115,10 @@ def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
         logger.debug(f"Invalid JWT: {e}")
         return None
 
+# ---------------------------------------------------------------------------
+# Guest session
+# ---------------------------------------------------------------------------
+
 def create_guest_session() -> Dict[str, Any]:
     """Create a guest session token."""
     user_data = {
@@ -73,9 +136,32 @@ def create_guest_session() -> Dict[str, Any]:
         "user": user_data
     }
 
+# ---------------------------------------------------------------------------
+# OTP helpers
+# ---------------------------------------------------------------------------
+
+def _check_otp_rate_limit(mobile: str) -> Tuple[bool, str]:
+    """
+    Enforce rate limiting: max OTP_RATE_MAX requests per mobile per OTP_RATE_WINDOW seconds.
+    Returns (allowed: bool, message: str).
+    """
+    now = time.time()
+    entry = OTP_STORE.get(mobile, {})
+    window_start = entry.get("window_start", 0)
+    count = entry.get("request_count", 0)
+
+    if now - window_start > OTP_RATE_WINDOW:
+        # Window expired — reset counter
+        return True, ""
+
+    if count >= OTP_RATE_MAX:
+        remaining = int(OTP_RATE_WINDOW - (now - window_start))
+        return False, f"Too many OTP requests. Please wait {remaining} seconds before trying again."
+
+    return True, ""
+
 def request_otp(mobile_number: str) -> Dict[str, Any]:
     """Generate and send 6-digit OTP for a mobile number."""
-    # Clean mobile number
     clean_mobile = "".join([c for c in mobile_number if c.isdigit()])
     if len(clean_mobile) > 10:
         clean_mobile = clean_mobile[-10:]
@@ -83,16 +169,27 @@ def request_otp(mobile_number: str) -> Dict[str, Any]:
     if len(clean_mobile) < 10:
         return {"success": False, "message": "Please enter a valid 10-digit mobile number."}
 
-    # Generate 6-digit OTP (e.g. 123456 or random)
-    # For testing and demo convenience, default OTP is set or standard
+    # Rate limit check
+    allowed, rate_msg = _check_otp_rate_limit(clean_mobile)
+    if not allowed:
+        return {"success": False, "message": rate_msg}
+
     otp_code = str(random.randint(100000, 999999))
-    # If using test user, default to easy OTP or actual generated code
+    now = time.time()
+
+    # Preserve the window_start if still within the current window
+    existing = OTP_STORE.get(clean_mobile, {})
+    window_start = existing.get("window_start", now) if (now - existing.get("window_start", 0)) <= OTP_RATE_WINDOW else now
+    request_count = existing.get("request_count", 0) + 1 if (now - existing.get("window_start", 0)) <= OTP_RATE_WINDOW else 1
+
     OTP_STORE[clean_mobile] = {
         "otp": otp_code,
-        "expires_at": time.time() + 600 # 10 mins
+        "expires_at": now + 600,   # 10-minute validity
+        "window_start": window_start,
+        "request_count": request_count
     }
 
-    logger.info(f"[OTP SEND] Generated OTP for {clean_mobile}: {otp_code}")
+    logger.info(f"[OTP SEND] Generated OTP for {clean_mobile}: {otp_code} (request #{request_count} in window)")
 
     # Check if this mobile exists in functionaries table
     conn = get_db_connection()
@@ -170,7 +267,7 @@ def verify_otp(mobile_number: str, otp: str) -> Dict[str, Any]:
             "status": func["status"]
         }
     else:
-        # Verified mobile number guest user
+        # Verified mobile number but not in census records — grant limited access
         user_data = {
             "user_id": f"field_user_{clean_mobile}",
             "name": f"Field User ({clean_mobile})",
@@ -180,9 +277,10 @@ def verify_otp(mobile_number: str, otp: str) -> Dict[str, Any]:
         }
 
     token = generate_jwt_token(user_data)
-    # Clear stored OTP
+    # Clear stored OTP (but preserve rate-limit window counters)
     if clean_mobile in OTP_STORE:
-        del OTP_STORE[clean_mobile]
+        OTP_STORE[clean_mobile]["otp"] = None
+        OTP_STORE[clean_mobile]["expires_at"] = 0
 
     return {
         "success": True,
@@ -190,8 +288,12 @@ def verify_otp(mobile_number: str, otp: str) -> Dict[str, Any]:
         "user": user_data
     }
 
+# ---------------------------------------------------------------------------
+# Admin login
+# ---------------------------------------------------------------------------
+
 def admin_login(username: str, password: str) -> Dict[str, Any]:
-    """Authenticate administrator credentials."""
+    """Authenticate administrator credentials using PBKDF2 verification."""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM admin_users WHERE username = ?", (username,))
@@ -201,8 +303,7 @@ def admin_login(username: str, password: str) -> Dict[str, Any]:
     if not admin:
         return {"success": False, "message": "Invalid admin username or password."}
 
-    pwd_hash = hashlib.sha256(password.encode()).hexdigest()
-    if admin["password_hash"] != pwd_hash:
+    if not verify_password(password, admin["password_hash"]):
         return {"success": False, "message": "Invalid admin username or password."}
 
     user_data = {

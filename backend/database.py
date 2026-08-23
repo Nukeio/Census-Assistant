@@ -62,6 +62,20 @@ def init_database():
         """)
 
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS hlb_descriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hlb_no TEXT NOT NULL,
+                village_ward_name TEXT,
+                landmark TEXT,
+                boundary_description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_hlb_descriptions_hlb_no ON hlb_descriptions(hlb_no)
+        """)
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS manual_chunks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_file TEXT NOT NULL,

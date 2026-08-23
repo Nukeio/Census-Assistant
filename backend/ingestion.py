@@ -15,21 +15,11 @@ logger = logging.getLogger("IngestionEngine")
 logging.basicConfig(level=logging.INFO)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
-# Admin-uploaded replacement files live in DATA_DIR (the persistent volume in
-# production); the original seed copies baked into the image/repo live in
-# ROOT_DIR. Always prefer a newer DATA_DIR copy if one has been uploaded.
-DATA_DIR = os.environ.get("DATA_DIR", ROOT_DIR)
-
-def _resolve_source(filename: str) -> str:
-    data_path = os.path.join(DATA_DIR, filename)
-    if os.path.exists(data_path):
-        return data_path
-    return os.path.join(ROOT_DIR, filename)
 
 def ingest_all_users(filepath: str = None) -> int:
     """Ingest All_Users.xlsx into functionaries table."""
     if not filepath:
-        filepath = _resolve_source("All_Users.xlsx")
+        filepath = os.path.join(ROOT_DIR, "All_Users.xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -89,7 +79,7 @@ def ingest_all_users(filepath: str = None) -> int:
 def ingest_hlb_allocation(filepath: str = None) -> int:
     """Ingest HLB Allocation (2).xlsx into hlb_allocations table."""
     if not filepath:
-        filepath = _resolve_source("HLB Allocation (2).xlsx")
+        filepath = os.path.join(ROOT_DIR, "HLB Allocation (2).xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -142,6 +132,61 @@ def ingest_hlb_allocation(filepath: str = None) -> int:
     return inserted
 
 
+def ingest_hlb_description(filepath: str = None) -> int:
+    """
+    Ingest 'HLB Description.xlsx' (columns: HLB No., Village/Ward name and code,
+    Landmark, HLB Description) into hlb_descriptions. This is the sheet that
+    finally carries a REAL village/ward name per HLB — before this, main.py's
+    _area_info() could only approximate location at the Supervisory Circle
+    level because neither All_Users.xlsx nor HLB Allocation (2).xlsx has a
+    usable village/area name. This table lets Google Maps links and the
+    "allocated area" shown in search results be block-precise instead.
+    """
+    if not filepath:
+        filepath = os.path.join(ROOT_DIR, "HLB Description.xlsx")
+    if not os.path.exists(filepath):
+        logger.warning(f"File not found: {filepath}")
+        return 0
+
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    ws = wb.active
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM hlb_descriptions")
+
+    inserted = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not row or not any(row):
+            continue
+        hlb_no_raw = row[0]
+        if hlb_no_raw is None:
+            continue
+        hlb_no = str(hlb_no_raw).strip()
+        if not hlb_no:
+            continue
+        # Normalize to a plain numeric string (strip leading zeros / non-digits)
+        # so this joins cleanly against hlb_allocations.hlb_no regardless of
+        # whether that sheet zero-pads the number (e.g. "0001") or not ("1").
+        digits = re.sub(r'\D', '', hlb_no)
+        hlb_no_norm = str(int(digits)) if digits else hlb_no
+
+        village_ward = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+        landmark = str(row[2]).strip() if len(row) > 2 and row[2] is not None else ""
+        description = str(row[3]).strip() if len(row) > 3 and row[3] is not None else ""
+
+        cursor.execute("""
+            INSERT INTO hlb_descriptions (hlb_no, village_ward_name, landmark, boundary_description)
+            VALUES (?, ?, ?, ?)
+        """, (hlb_no_norm, village_ward, landmark, description))
+        inserted += 1
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Ingested {inserted} HLB descriptions from {filepath}")
+    return inserted
+
+
 def ingest_pdf_manuals() -> int:
     """Ingest FAQ and HLO manuals into manual_chunks with section and page mapping."""
     pdf_files = [
@@ -170,7 +215,7 @@ def ingest_pdf_manuals() -> int:
     total_chunks = 0
 
     for pdf_info in pdf_files:
-        filepath = _resolve_source(pdf_info["filename"])
+        filepath = os.path.join(ROOT_DIR, pdf_info["filename"])
         if not os.path.exists(filepath):
             logger.warning(f"PDF file not found: {filepath}")
             continue
@@ -260,11 +305,13 @@ def run_full_ingestion():
     init_database()
     u_count = ingest_all_users()
     h_count = ingest_hlb_allocation()
+    d_count = ingest_hlb_description()
     p_count = ingest_pdf_manuals()
-    logger.info(f"Full Ingestion complete: {u_count} users, {h_count} HLB allocations, {p_count} PDF chunks.")
+    logger.info(f"Full Ingestion complete: {u_count} users, {h_count} HLB allocations, {d_count} HLB descriptions, {p_count} PDF chunks.")
     return {
         "users_count": u_count,
         "hlb_allocations_count": h_count,
+        "hlb_descriptions_count": d_count,
         "pdf_chunks_count": p_count,
         "status": "Completed"
     }

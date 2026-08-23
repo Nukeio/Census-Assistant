@@ -25,8 +25,11 @@ def detect_intent(query: str) -> str:
     
     # HLB (formerly "EB") or Enumerator / Record lookup. The "eb" alias is
     # still recognized so old queries/links keep working, but every
-    # response now speaks in HLB terms only.
-    if re.search(r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|who is in charge)\b', q):
+    # response now speaks in HLB terms only. Also explicitly recognizes the
+    # literal phrasing the search result card's ">" (chevron) button sends —
+    # "Show details for <name>" — so opening a profile always resolves to a
+    # person record instead of falling through to a generic manual answer.
+    if re.search(r'\b(eb\s*\d+|hlb\s*\d+|block\s*\d+|assigned to|enumerator|charge user|who is in charge|show details for|details for|profile of)\b', q):
         return INTENT_RECORD_SEARCH
 
     # Supervisor specific query. Note: "S. A. Ahmed" is NOT a supervisor —
@@ -41,8 +44,21 @@ def detect_intent(query: str) -> str:
         
     return INTENT_GENERAL
 
-def search_structured_records(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """Search functionaries and HLB allocations for matching records."""
+def search_structured_records(query: str, limit: int = 5, strict: bool = False) -> List[Dict[str, Any]]:
+    """
+    Search functionaries and HLB allocations for matching records.
+
+    `strict=True` is used for queries that only weakly imply a record lookup
+    (GENERAL intent — no HLB/enumerator/supervisor keyword at all). In that
+    mode, the free-text name search below requires ALL of the query's
+    keywords to match (AND, not OR) and skips the LIKE fallback — a loose
+    single-word OR/LIKE match was the cause of unrelated general questions
+    (e.g. "do we use pen or pencil to draw the map") spuriously matching a
+    person via a stray prefix hit (e.g. on a village name) and being shown
+    as a "Functionary Record Found" instead of being treated as a general
+    question. The precise HLB-number lookup below is unaffected by `strict`
+    since a literal HLB/EB/block number is never a false signal.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     results = []
@@ -61,6 +77,23 @@ def search_structured_records(query: str, limit: int = 5) -> List[Dict[str, Any]
             LIMIT ?
         """, (padded_eb, f"%{eb_num}", eb_num.zfill(3), limit))
         for row in cursor.fetchall():
+            # Look up the real village/ward name for this HLB from
+            # hlb_descriptions (normalize the number the same way
+            # ingest_hlb_description() does, so '0012' and '12' both match).
+            village_name = None
+            digits = re.sub(r'\D', '', row["hlb_no"] or "")
+            hlb_norm = str(int(digits)) if digits else None
+            if hlb_norm:
+                desc_row = cursor.execute(
+                    "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
+                    (hlb_norm,)
+                ).fetchone()
+                if desc_row:
+                    # Prefer "landmark" — same name without the redundant
+                    # trailing "(0001)"-style HLB code.
+                    village_name = desc_row["landmark"] or (
+                        re.sub(r'\s*\(\d+\)\s*$', '', desc_row["village_ward_name"] or "").strip() or None
+                    )
             results.append({
                 "type": "hlb_allocation",
                 "hlb_no": row["hlb_no"],
@@ -71,12 +104,44 @@ def search_structured_records(query: str, limit: int = 5) -> List[Dict[str, Any]
                 "allotment_date": row["allotment_date"],
                 "mobile": row["enum_mobile"] or "+91 84534 41975",
                 "district": row["district"] or "Goalpara",
+                "area_name": village_name,
                 "source": "Census Record DB - 2024 (HLB Allocation)"
             })
 
     # 2. Check for Name or Mobile or User ID in functionaries
     clean_words = [w for w in re.split(r'[^a-zA-Z0-9]', query) if len(w) >= 3 and w.lower() not in ["who", "what", "is", "assigned", "to", "the", "for", "show", "details", "census", "find", "search"]]
-    if clean_words:
+
+    if strict:
+        # Require ALL keywords to match (AND), and only when there are at
+        # least two of them — a single generic English word is far too easy
+        # to spuriously prefix-match against a name/village field.
+        if len(clean_words) >= 2:
+            fts_query = " AND ".join([f'"{w}"*' for w in clean_words])
+            try:
+                cursor.execute("""
+                    SELECT f.* FROM functionaries f
+                    JOIN functionaries_fts fts ON f.id = fts.rowid
+                    WHERE functionaries_fts MATCH ?
+                    LIMIT ?
+                """, (fts_query, limit))
+                for row in cursor.fetchall():
+                    if not any(r.get("user_id") == row["user_id"] for r in results):
+                        results.append({
+                            "type": "functionary",
+                            "user_id": row["user_id"],
+                            "name": row["name"],
+                            "functionary_type": row["functionary_type"],
+                            "mobile_number": row["mobile_number"],
+                            "district": row["district"],
+                            "sub_district": row["sub_district"],
+                            "status": row["status"],
+                            "source": "Census Record DB - 2024 (All Users)"
+                        })
+            except Exception as e:
+                logger.debug(f"FTS functionaries strict query error: {e}")
+        # No OR / LIKE fallback in strict mode — a weak, single-signal match
+        # is exactly what produced false positives on unrelated questions.
+    elif clean_words:
         fts_query = " OR ".join([f'"{w}"*' for w in clean_words])
         try:
             cursor.execute("""
@@ -102,27 +167,27 @@ def search_structured_records(query: str, limit: int = 5) -> List[Dict[str, Any]
         except Exception as e:
             logger.debug(f"FTS functionaries query error: {e}")
 
-    # Fallback to direct LIKE query if FTS gave no results
-    if not results and clean_words:
-        for word in clean_words[:2]:
-            cursor.execute("""
-                SELECT * FROM functionaries 
-                WHERE name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?
-                LIMIT ?
-            """, (f"%{word}%", f"%{word}%", f"%{word}%", limit))
-            for row in cursor.fetchall():
-                if not any(r.get("user_id") == row["user_id"] for r in results):
-                    results.append({
-                        "type": "functionary",
-                        "user_id": row["user_id"],
-                        "name": row["name"],
-                        "functionary_type": row["functionary_type"],
-                        "mobile_number": row["mobile_number"],
-                        "district": row["district"],
-                        "sub_district": row["sub_district"],
-                        "status": row["status"],
-                        "source": "Census Record DB - 2024 (All Users)"
-                    })
+        # Fallback to direct LIKE query if FTS gave no results
+        if not results:
+            for word in clean_words[:2]:
+                cursor.execute("""
+                    SELECT * FROM functionaries
+                    WHERE name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?
+                    LIMIT ?
+                """, (f"%{word}%", f"%{word}%", f"%{word}%", limit))
+                for row in cursor.fetchall():
+                    if not any(r.get("user_id") == row["user_id"] for r in results):
+                        results.append({
+                            "type": "functionary",
+                            "user_id": row["user_id"],
+                            "name": row["name"],
+                            "functionary_type": row["functionary_type"],
+                            "mobile_number": row["mobile_number"],
+                            "district": row["district"],
+                            "sub_district": row["sub_district"],
+                            "status": row["status"],
+                            "source": "Census Record DB - 2024 (All Users)"
+                        })
 
     conn.close()
     return results
@@ -221,7 +286,11 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
     manual_results = []
 
     if intent in [INTENT_RECORD_SEARCH, INTENT_SUPERVISOR_QUERY, INTENT_GENERAL]:
-        record_results = search_structured_records(query, limit=5)
+        # GENERAL means the query had no HLB/enumerator/supervisor keyword at
+        # all — it's a weak signal for a record lookup (e.g. someone just
+        # typed a plain name with no other context), so search strictly to
+        # avoid a random word in the question spuriously matching a person.
+        record_results = search_structured_records(query, limit=5, strict=(intent == INTENT_GENERAL))
     
     if intent in [INTENT_MANUAL_SEARCH, INTENT_GENERAL] or not record_results:
         manual_results = search_manual_chunks(query, limit=3)
@@ -234,10 +303,11 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         context_parts.append("### OFFICIAL CENSUS RECORDS (EXCEL DATA):")
         for idx, rec in enumerate(record_results, 1):
             if rec.get("type") == "hlb_allocation":
+                area_bit = f" | Area/Village: {rec['area_name']}" if rec.get("area_name") else ""
                 context_parts.append(
                     f"{idx}. HLB Number: {rec['hlb_no']} | Circle: {rec['circle_no']} | "
                     f"Enumerator: {rec['enumerator_name']} (ID: {rec['enumerator_user_id']}) | "
-                    f"Supervisor: {rec['supervisor_name']} | Allotment Date: {rec['allotment_date']}"
+                    f"Supervisor: {rec['supervisor_name']} | Allotment Date: {rec['allotment_date']}{area_bit}"
                 )
                 citations.append(rec['source'])
             else:

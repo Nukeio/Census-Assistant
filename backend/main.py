@@ -4,6 +4,7 @@ Serves REST APIs, RAG endpoints, Authentication, Admin Management, Webhooks, and
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -14,7 +15,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from .database import get_db_connection, init_database
-from .ingestion import run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_pdf_manuals
+from .ingestion import run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query
 from .auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
@@ -133,15 +134,42 @@ def chat_endpoint():
     return jsonify(result)
 
 # ----------------- Census Records Search Endpoints -----------------
-def _area_info(circle_no):
+def _hlb_no_norm(hlb_no):
+    """Normalize an HLB number to a plain numeric string (strips leading
+    zeros / non-digits) so lookups work regardless of how a given sheet
+    padded the number (e.g. '0001' vs '1')."""
+    if hlb_no is None:
+        return None
+    digits = re.sub(r'\D', '', str(hlb_no))
+    return str(int(digits)) if digits else str(hlb_no).strip()
+
+def _area_info(hlb_no, circle_no=None):
     """
-    Best-effort "allocated area" label + Google Maps link for a supervisory
-    circle. The source Excel sheets (All_Users.xlsx / HLB Allocation.xlsx)
-    only carry numeric State/District/Sub-District census codes and a blank
-    Village/Town column — there is no actual village/area name or GPS data
-    to draw on. Until that data is supplied, this falls back to the circle
-    name/number, which is real but not block-precise.
+    "Allocated area" label + Google Maps link. Prefers the real village/ward
+    name from HLB Description.xlsx (ingested into hlb_descriptions) when we
+    have an HLB number to look it up — this is block-precise. Falls back to
+    a Supervisory-Circle-level approximation (real but not block-precise)
+    when no HLB number is given or it isn't found in that sheet, since
+    All_Users.xlsx / HLB Allocation.xlsx alone don't carry village/area names.
     """
+    norm = _hlb_no_norm(hlb_no)
+    if norm:
+        conn = get_db_connection()
+        row = conn.execute(
+            "SELECT village_ward_name, landmark FROM hlb_descriptions WHERE hlb_no = ?",
+            (norm,)
+        ).fetchone()
+        conn.close()
+        if row and (row["landmark"] or row["village_ward_name"]):
+            # Prefer "landmark" — it's the same village/ward name without the
+            # redundant trailing "(0001)"-style HLB code that
+            # village_ward_name carries, so it reads cleaner and geocodes
+            # slightly better on Google Maps.
+            village_name = row["landmark"] or re.sub(r'\s*\(\d+\)\s*$', '', row["village_ward_name"]).strip()
+            maps_url = "https://www.google.com/maps/search/?api=1&query=" + \
+                requests_quote(f"{village_name}, {CIRCLE_NAME}, Assam, India")
+            return village_name, maps_url
+
     if not circle_no:
         return None, None
     label = f"{CIRCLE_NAME} — Supervisory Circle {circle_no}"
@@ -189,7 +217,7 @@ def records_search():
             conn.close()
             results = []
             for r in hlb_rows:
-                area_name, maps_url = _area_info(r["supervisory_circle_no"])
+                area_name, maps_url = _area_info(r["hlb_no"], r["supervisory_circle_no"])
                 results.append({
                     "id": r["id"],
                     "name": r["enumerator_name"],
@@ -239,7 +267,7 @@ def records_search():
         hlb_no = hlb_match["hlb_no"] if hlb_match else None
         sup_str = hlb_match["supervisor_name"] if hlb_match else None
         circle_no = hlb_match["supervisory_circle_no"] if hlb_match else None
-        area_name, maps_url = _area_info(circle_no)
+        area_name, maps_url = _area_info(hlb_no, circle_no)
 
         results.append({
             "id": r["id"],
@@ -304,7 +332,7 @@ def supervisor_list():
         """, (r["name"], f"%{r['name']}%"))
         hlb_count = cursor.fetchone()[0]
 
-        area_name, maps_url = _area_info(circles[0] if circles else None)
+        area_name, maps_url = _area_info(None, circles[0] if circles else None)
         supervisors.append({
             "name": r["name"],
             "user_id": r["user_id"],
@@ -490,6 +518,8 @@ def upload_excel():
     # Ingest based on filename
     if "user" in filename.lower():
         cnt = ingest_all_users(target_path)
+    elif "description" in filename.lower():
+        cnt = ingest_hlb_description(target_path)
     else:
         cnt = ingest_hlb_allocation(target_path)
 

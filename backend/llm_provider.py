@@ -8,6 +8,7 @@ import re
 import json
 import logging
 import requests
+from urllib.parse import quote as url_quote
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger("LLMProvider")
@@ -81,12 +82,18 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     if eb_match and records:
         rec = records[0]
         if rec.get("type") == "hlb_allocation":
+            area_name = rec.get("area_name")
+            maps_line_en = f"• **Area/Village:** {area_name}\n" if area_name else ""
+            maps_line_as = f"• অঞ্চল/গাঁও: {area_name}\n" if area_name else ""
+            maps_line_hi = f"• क्षेत्र/गांव: {area_name}\n" if area_name else ""
+            maps_line_bn = f"• এলাকা/গ্রাম: {area_name}\n" if area_name else ""
             if lang == "as":
                 return (
                     f"**HLB {rec['hlb_no']}** ৰ তথ্য:\n"
                     f"• গণনাকাৰী (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• পৰ্যবেক্ষক (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• চাৰ্কেল নং: {rec['circle_no']} | আবণ্টন তাৰিখ: {rec['allotment_date']}\n"
+                    f"{maps_line_as}"
                     f"• মোবাইল নম্বৰ: {rec.get('mobile', '+91 84534 41975')}\n\n"
                     f"কাৰিকৰী সহায়ৰ বাবে যোগাযোগ কৰক: **শ্বাহীন শ্বাহ এ.** (+91 84534 41975)\n\n"
                     f"📌 *উৎস: {rec['source']}*"
@@ -97,6 +104,7 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"• प्रगणक (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• पर्यवेक्षक (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• सर्कल सं.: {rec['circle_no']} | आवंटन तिथि: {rec['allotment_date']}\n"
+                    f"{maps_line_hi}"
                     f"• मोबाइल नंबर: {rec.get('mobile', '+91 84534 41975')}\n\n"
                     f"तकनीकी सहायता के लिए संपर्क करें: **शाहीन शाह ए.** (+91 84534 41975)\n\n"
                     f"📌 *स्रोत: {rec['source']}*"
@@ -107,18 +115,26 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"• গণনাকারী (Enumerator): **{rec['enumerator_name']}** (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• তত্ত্বাবধায়ক (Supervisor): **{rec['supervisor_name']}**\n"
                     f"• সার্কেল নং: {rec['circle_no']} | বরাদ্দের তারিখ: {rec['allotment_date']}\n"
+                    f"{maps_line_bn}"
                     f"• মোবাইল নম্বর: {rec.get('mobile', '+91 84534 41975')}\n\n"
                     f"কারিগরি সহায়তার জন্য যোগাযোগ করুন: **শাহীন শাহ এ.** (+91 84534 41975)\n\n"
                     f"📌 *উৎস: {rec['source']}*"
                 )
             else:
+                maps_link_line = ""
+                if area_name:
+                    maps_url = "https://www.google.com/maps/search/?api=1&query=" + \
+                        url_quote(f"{area_name}, Lakhipur Circle, Assam, India")
+                    maps_link_line = f"• **Google Maps:** {maps_url}\n"
                 return (
                     f"**HLB {rec['hlb_no']} Assignment Details:**\n\n"
                     f"• **Assigned Enumerator:** {rec['enumerator_name']} (User ID: `{rec['enumerator_user_id']}`)\n"
                     f"• **Supervisor:** {rec['supervisor_name']}\n"
                     f"• **Supervisory Circle:** {rec['circle_no']}\n"
+                    f"{maps_line_en}"
                     f"• **Allotment Date:** {rec['allotment_date']}\n"
-                    f"• **Contact Mobile:** {rec.get('mobile', '+91 84534 41975')}\n\n"
+                    f"• **Contact Mobile:** {rec.get('mobile', '+91 84534 41975')}\n"
+                    f"{maps_link_line}\n"
                     f"For technical assistance or re-allocations, contact Technical Assistant **Shahin Sha A.** (+91 84534 41975) on WhatsApp.\n\n"
                     f"📌 *Source: {rec['source']}*"
                 )
@@ -194,15 +210,29 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
                     f"For technical assistance, contact **Shahin Sha A.** (+91 84534 41975) or **S. A. Ahmed** (+91 69019 80926) on WhatsApp."
                 )
 
-    # 3. Person Name lookup. This used to require intent == "RECORD_SEARCH"
-    # exactly, but detect_intent()'s keyword regex is narrow and doesn't
-    # recognize phrasing like "Show details for <name>" (used by the ">"
-    # button on a search result card) — that phrasing classifies as GENERAL,
-    # so a real functionary match here was being ignored and falling through
-    # to the generic manual-guideline answer below every time. Show the
-    # matched person whenever we have one, as long as the query wasn't
-    # actually a guideline/manual question (MANUAL_SEARCH).
-    if records and intent != "MANUAL_SEARCH":
+    # 3. Person Name lookup. Previously this required intent == "RECORD_SEARCH"
+    # exactly, but detect_intent()'s keyword regex didn't recognize phrasing
+    # like "Show details for <name>" (used by the ">" button on a search
+    # result card), so that phrasing classified as GENERAL and this section
+    # was skipped, falling through to the generic manual-guideline answer.
+    # That was fixed by broadening detect_intent()'s RECORD_SEARCH regex
+    # itself to recognize "show details for" / "details for" / "profile of"
+    # — so it's safe (and necessary) to go back to the strict intent check
+    # here. Loosening this check the naive way (e.g. "intent != MANUAL_SEARCH")
+    # caused unrelated general questions to be hijacked into a false
+    # "Functionary Record Found" whenever a stray word in the question
+    # happened to prefix-match some unrelated person/village in the DB.
+    #
+    # GENERAL is also allowed through here (in addition to RECORD_SEARCH) —
+    # someone typing just a plain name with no other keyword ("who is
+    # Shahin Sha Alomgir") classifies as GENERAL, not RECORD_SEARCH. This is
+    # safe because rag_engine.search_structured_records() runs in `strict`
+    # mode for GENERAL intent, requiring EVERY keyword in the query to match
+    # the same record (AND, not OR) — a multi-word unrelated question like
+    # "do we use pen or pencil to draw the map" cannot satisfy that, so no
+    # record is ever found for it in the first place (verified: intent stays
+    # GENERAL with zero record_results for that exact query).
+    if records and intent in ("RECORD_SEARCH", "GENERAL"):
         rec = records[0]
         if rec.get("type") == "functionary":
             return (

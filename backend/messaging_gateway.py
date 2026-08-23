@@ -124,7 +124,7 @@ def handle_whatsapp_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
             logger.info(f"[WhatsApp Inbound] From {sender_phone}: {user_text}")
 
             # Generate RAG grounded answer
-            ai_result = answer_query(user_text, model_name="gemini-2.5-flash", lang="en")
+            ai_result = answer_query(user_text, model_name="gemini-3.6-flash", lang="en")
             reply_text = ai_result.get("answer", "Thank you for contacting Census Assistant.")
 
             # Append contact footer
@@ -189,7 +189,7 @@ def handle_telegram_webhook(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "welcome_sent"}
 
         # Process natural language query with RAG
-        ai_result = answer_query(text, model_name="gemini-2.5-flash", lang="en")
+        ai_result = answer_query(text, model_name="gemini-3.6-flash", lang="en")
         reply = ai_result.get("answer", "")
         send_telegram_message(chat_id, reply)
         return {"status": "replied"}

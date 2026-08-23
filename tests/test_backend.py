@@ -75,7 +75,7 @@ class CensusAssistantTestSuite(unittest.TestCase):
         """Test RAG engine answering queries in all 4 supported languages."""
         langs = ["en", "as", "hi", "bn"]
         for lang in langs:
-            res = answer_query("Who is assigned to EB 12?", model_name="gemini-2.5-flash", lang=lang)
+            res = answer_query("Who is assigned to EB 12?", model_name="gemini-3.6-flash", lang=lang)
             self.assertIn("answer", res)
             self.assertGreater(len(res["answer"]), 20)
             self.assertTrue(len(res["citations"]) > 0)
@@ -150,7 +150,7 @@ class CensusAssistantTestSuite(unittest.TestCase):
             "Tell me about the history of Rome."
         ]
         for query in off_topic_queries:
-            res = answer_query(query, model_name="gemini-2.5-flash", lang="en")
+            res = answer_query(query, model_name="gemini-3.6-flash", lang="en")
             self.assertEqual(
                 res["answer"].strip(),
                 NOT_FOUND_PHRASE,

@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: census-assistant
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/admin/stats
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: DATA_DIR
+        value: /app/data
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEV_OTP_BYPASS
+        value: "false"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TECH_ASSISTANT_NAME
+        value: "Shahin Sha A."
+      - key: TECH_ASSISTANT_PHONE
+        value: "+91 84534 41975"
+      - key: SUPERVISOR_NAME
+        value: "S. A. Ahmed"
+      - key: CIRCLE_NAME
+        value: "Lakhipur Circle"

@@ -24,3 +24,11 @@ android/.cxx/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local debug/scratch artifacts (device testing, diagnostics, planning notes —
+# never meant to ship in the repo)
+*.apk
+_apk_download/
+_debug_screen*.png
+_query_*.py
+implementation_plan*

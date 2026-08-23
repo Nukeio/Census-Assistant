@@ -244,8 +244,8 @@ def init_database():
         # System settings defaults                                             #
         # ------------------------------------------------------------------ #
         default_settings = {
-            "active_model": "gemini-2.5-flash",
-            "available_models": json.dumps(["gemini-2.5-flash", "gemini-2.5-pro", "gpt-4o", "claude-3-5-sonnet"]),
+            "active_model": "gemini-3.6-flash",
+            "available_models": json.dumps(["gemini-3.6-flash", "gemini-2.5-pro", "gpt-4o", "claude-3-5-sonnet"]),
             "technical_assistant_name": "Shahin Sha A.",
             "technical_assistant_phone": "+91 84534 41975",
             "technical_assistant_wa_link": "https://wa.me/918453441975",

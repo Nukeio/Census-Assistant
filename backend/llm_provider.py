@@ -320,7 +320,7 @@ def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any
         logger.error(f"Gemini API request failed: {e}")
     return None
 
-def answer_query(query: str, model_name: str = "gemini-2.5-flash", lang: str = "en") -> Dict[str, Any]:
+def answer_query(query: str, model_name: str = "gemini-3.6-flash", lang: str = "en") -> Dict[str, Any]:
     """Top-level generation function that coordinates RAG retrieval and LLM call or local fallback."""
     from .rag_engine import retrieve_rag_context
     import time

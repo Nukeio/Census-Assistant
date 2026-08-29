@@ -39,6 +39,29 @@ ALLOWED_PDF_EXTENSIONS = {".pdf"}
 logger = logging.getLogger("CensusServer")
 logging.basicConfig(level=logging.INFO)
 
+def resolve_existing_upload(filename: str):
+    """
+    Resolve a filename that is expected to already exist in ROOT_DIR (e.g.
+    one just returned by /api/admin/uploaded-files) to its real path.
+
+    Deliberately does NOT run it through secure_filename() — that sanitizer
+    rewrites spaces, parentheses, and other characters (e.g. "HLB Allocation
+    (2).xlsx" -> "HLB_Allocation_2.xlsx"), which no longer matches the real
+    file on disk and makes lookups 404 even though the file is right there.
+    os.path.basename() blocks path traversal (it discards any directory
+    components) without mangling a legitimate filename, and the containment
+    check below rejects anything that still resolves outside ROOT_DIR.
+
+    Returns the absolute path if it exists as a real file inside ROOT_DIR, else None.
+    """
+    safe_name = os.path.basename(filename)
+    full_path = os.path.abspath(os.path.join(ROOT_DIR, safe_name))
+    if os.path.dirname(full_path) != os.path.abspath(ROOT_DIR):
+        return None
+    if not os.path.isfile(full_path):
+        return None
+    return full_path
+
 app = Flask(__name__, static_folder=FRONTEND_DIR)
 CORS(app)
 
@@ -672,11 +695,10 @@ def manual_chunk_detail():
 @app.route("/api/manuals/file/<path:filename>", methods=["GET"])
 def manual_file(filename):
     """Serve the actual PDF bytes so 'Open Full PDF' opens the real document."""
-    safe_name = secure_filename(filename)
-    full_path = os.path.join(ROOT_DIR, safe_name)
-    if not safe_name.lower().endswith(".pdf") or not os.path.isfile(full_path):
+    full_path = resolve_existing_upload(filename)
+    if not full_path or not full_path.lower().endswith(".pdf"):
         return jsonify({"error": "File not found"}), 404
-    return send_from_directory(ROOT_DIR, safe_name, mimetype="application/pdf")
+    return send_from_directory(ROOT_DIR, os.path.basename(full_path), mimetype="application/pdf")
 
 # ----------------- Notifications Endpoints -----------------
 @app.route("/api/notifications", methods=["GET"])
@@ -1034,10 +1056,10 @@ def admin_delete_file(filename):
     if admin_error:
         return admin_error
 
-    safe_name = secure_filename(filename)
-    full_path = os.path.join(ROOT_DIR, safe_name)
-    if not os.path.exists(full_path):
+    full_path = resolve_existing_upload(filename)
+    if not full_path:
         return jsonify({"success": False, "error": "File does not exist."}), 404
+    safe_name = os.path.basename(full_path)
 
     try:
         # Purge exactly the rows this file is responsible for BEFORE removing

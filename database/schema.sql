@@ -133,3 +133,37 @@ VALUES
     ('Meeting Schedule - Oct 25', 'Mandatory briefing for regional coordinators regarding data collection protocols and verification workflows.', 'Notices', 'normal', 'Oct 25', '2 hours ago'),
     ('New Demographic Database Uploaded', 'The latest demographic dataset for Lakhipur Circle has been successfully integrated into the central knowledge repository.', 'Alerts', 'normal', 'Database', 'Yesterday'),
     ('Census Deadline Extension', 'Due to field operations requirements in northern districts, the house listing submission deadline has been extended by 48 hours.', 'Alerts', 'urgent', 'Urgent', 'Oct 20');
+
+-- ====================================================================
+-- 11. Field Attendance Register
+-- One row per functionary per calendar day (IST). The UNIQUE constraint
+-- is what guarantees a person can never hold two entries for the same
+-- day — a resubmission updates the existing row instead of inserting.
+-- ====================================================================
+CREATE TABLE IF NOT EXISTS attendance_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mobile_number VARCHAR(20) NOT NULL,
+    attendance_date DATE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    position VARCHAR(20) NOT NULL CHECK (position IN ('Enumerator', 'Supervisor')),
+    block_number VARCHAR(30) NOT NULL,
+    latitude DOUBLE PRECISION NOT NULL,
+    longitude DOUBLE PRECISION NOT NULL,
+    accuracy_m DOUBLE PRECISION,
+    photo_filename TEXT,
+    photo_deleted BOOLEAN DEFAULT FALSE,
+    status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    reject_reason TEXT,
+    reviewed_by VARCHAR(255),
+    reviewed_at TIMESTAMPTZ,
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    submission_count INTEGER DEFAULT 1,
+    user_id VARCHAR(100),
+    UNIQUE (mobile_number, attendance_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_records(attendance_date);
+CREATE INDEX IF NOT EXISTS idx_attendance_mobile ON attendance_records(mobile_number);
+CREATE INDEX IF NOT EXISTS idx_attendance_status ON attendance_records(status);
+CREATE INDEX IF NOT EXISTS idx_attendance_position ON attendance_records(position);

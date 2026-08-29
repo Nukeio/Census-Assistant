@@ -146,6 +146,12 @@ def init_database():
             )
         """)
 
+        # Field attendance register (one row per mobile number per IST day).
+        # Imported here rather than at module scope to avoid a circular import
+        # — attendance.py imports get_db_connection from this module.
+        from .attendance import init_attendance_schema
+        init_attendance_schema(cursor)
+
         # ------------------------------------------------------------------ #
         # Performance indexes                                                  #
         # ------------------------------------------------------------------ #

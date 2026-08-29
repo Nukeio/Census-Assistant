@@ -32,3 +32,7 @@ _apk_download/
 _debug_screen*.png
 _query_*.py
 implementation_plan*
+
+# Field attendance photos — uploaded by field staff, deleted automatically on
+# admin approval. Never commit these: they are personal data.
+attendance_photos/

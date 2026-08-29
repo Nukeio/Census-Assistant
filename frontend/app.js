@@ -17,9 +17,12 @@ const I18N = {
     nav_assistant: "Assistant",
     nav_manual: "Manuals",
     nav_supervisor: "Supervisor",
+    nav_attendance: "Attendance",
     nav_alerts: "Alerts",
     nav_settings: "Settings",
     nav_admin: "Admin",
+    attendance_title: "Mark Today's Attendance",
+    attendance_home_sub: "Submit your name, position, block number, photo and live location.",
     search_placeholder: "Ask anything about Census or search HLB...",
     chat_wa: "Chat on WhatsApp",
     ask_ai: "Ask AI",
@@ -50,9 +53,12 @@ const I18N = {
     nav_assistant: "এআই সহায়ক",
     nav_manual: "মেনুৱেল",
     nav_supervisor: "পৰ্যবেক্ষক",
+    nav_attendance: "উপস্থিতি",
     nav_alerts: "বিজ্ঞপ্তি",
     nav_settings: "ছেটিংছ",
     nav_admin: "এডমিন",
+    attendance_title: "আজিৰ উপস্থিতি দিয়ক",
+    attendance_home_sub: "নাম, পদ, ব্লক নম্বৰ, ফটো আৰু বৰ্তমানৰ অৱস্থান দাখিল কৰক।",
     search_placeholder: "লোকপিয়ল বা HLB সম্পৰ্কে যিকোনো প্ৰশ্ন সুধক...",
     chat_wa: "হোৱাটছএপত বাৰ্তালাপ কৰক",
     ask_ai: "এআই ক সোধক",
@@ -83,9 +89,12 @@ const I18N = {
     nav_assistant: "एआई सहायक",
     nav_manual: "नियमावली",
     nav_supervisor: "पर्यवेक्षक",
+    nav_attendance: "उपस्थिति",
     nav_alerts: "सूचनाएं",
     nav_settings: "सेटिंग्स",
     nav_admin: "व्यवस्थापक",
+    attendance_title: "आज की उपस्थिति दर्ज करें",
+    attendance_home_sub: "नाम, पद, ब्लॉक संख्या, फोटो और वर्तमान स्थान जमा करें।",
     search_placeholder: "जनगणना या HLB ब्लॉक के बारे में पूछें...",
     chat_wa: "व्हाट्सएप पर चैट करें",
     ask_ai: "एआई से पूछें",
@@ -116,9 +125,12 @@ const I18N = {
     nav_assistant: "এআই সহকারী",
     nav_manual: "ম্যানুয়াল",
     nav_supervisor: "তত্ত্বাবধায়ক",
+    nav_attendance: "উপস্থিতি",
     nav_alerts: "বিজ্ঞপ্তি",
     nav_settings: "সেটিংস",
     nav_admin: "অ্যাডমিন",
+    attendance_title: "আজকের উপস্থিতি দিন",
+    attendance_home_sub: "নাম, পদ, ব্লক নম্বর, ছবি এবং বর্তমান অবস্থান জমা দিন।",
     search_placeholder: "আদমশুমারি বা HLB ব্লক সম্পর্কে প্রশ্ন করুন...",
     chat_wa: "হোয়াটসঅ্যাপে চ্যাট করুন",
     ask_ai: "এআই কে জিজ্ঞাসা করুন",
@@ -148,7 +160,23 @@ const state = {
   recordsFilter: "all",
   recordsPage: 1,
   pendingMobileForOtp: "",
-  searchDebounceTimer: null
+  searchDebounceTimer: null,
+
+  // ----- Field attendance (see section 11) -----
+  attendance: {
+    record: null,           // today's saved record for the entered mobile, if any
+    photoBlob: null,        // downsized JPEG waiting to be uploaded
+    photoName: "",
+    location: null,         // { latitude, longitude, accuracy }
+    lookupTimer: null,
+    editing: false
+  },
+  adminAttendance: {
+    status: "",
+    searchTimer: null,
+    photoObjectUrl: null,
+    rejectTargetId: null
+  }
 };
 
 // ==================== ANDROID BRIDGE HELPERS ====================
@@ -252,6 +280,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       updateUserHeader();
       applyRoleBasedNav();
       handleRouteFromHash();
+      refreshHomeAttendanceStatus();
     } else {
       showLoginView();
     }
@@ -279,7 +308,7 @@ function showAppShell() {
 }
 
 function navigateTo(viewName, updateHash = true) {
-  const validViews = ["home", "search", "chat", "manual", "supervisor", "notifications", "settings", "admin"];
+  const validViews = ["home", "search", "chat", "manual", "supervisor", "attendance", "notifications", "settings", "admin"];
   if (!validViews.includes(viewName)) viewName = "home";
 
   // Major Issue guard: the admin portal is only for the Technical Assistant
@@ -338,6 +367,7 @@ function navigateTo(viewName, updateHash = true) {
     chat: "AI Chat Assistant",
     manual: "Manuals & Guidelines",
     supervisor: "Supervisor Details",
+    attendance: "Field Attendance",
     notifications: "Official Updates",
     settings: "App Settings",
     admin: "Admin Control Center"
@@ -354,6 +384,9 @@ function navigateTo(viewName, updateHash = true) {
     loadUploadedFiles();
     loadAdminUsers();
     loadAdminQueryLogs();
+    loadAdminAttendance();
+  } else if (viewName === "attendance") {
+    initAttendanceView();
   } else if (viewName === "notifications") {
     loadNotifications();
   } else if (viewName === "supervisor") {
@@ -1792,6 +1825,740 @@ async function loadAdminQueryLogs() {
     });
   } catch (err) {
     container.innerHTML = `<p class="text-xs text-error p-3">Failed to load query logs.</p>`;
+  }
+}
+
+// ==================== 9b. FIELD ATTENDANCE (USER SIDE) ====================
+/**
+ * Daily attendance marking.
+ *
+ * The mobile number entered in the form is the identity key: the backend
+ * enforces one row per (mobile number, IST date), so submitting again on the
+ * same day always UPDATES that entry instead of creating a duplicate. Name,
+ * position and block number carry forward from the person's last submission,
+ * so a returning user only re-takes the photo and re-confirms their location.
+ */
+
+const ATTENDANCE_STATUS_STYLES = {
+  PENDING:  { chip: "bg-[#8a6100]/10 text-[#8a6100]", label: "Pending review",
+              banner: "bg-[#8a6100]/10 border-[#8a6100]/30", icon: "hourglass_top", iconClass: "text-[#8a6100]" },
+  APPROVED: { chip: "bg-[#2e7d32]/10 text-[#2e7d32]", label: "Approved",
+              banner: "bg-[#2e7d32]/10 border-[#2e7d32]/30", icon: "verified", iconClass: "text-[#2e7d32]" },
+  REJECTED: { chip: "bg-error/10 text-error", label: "Rejected",
+              banner: "bg-error/10 border-error/30", icon: "error", iconClass: "text-error" }
+};
+
+function todayIstString() {
+  // The register's day boundary is IST (matching the backend), so derive it
+  // from UTC rather than trusting whatever timezone the device is set to.
+  const now = new Date();
+  const istMs = now.getTime() + now.getTimezoneOffset() * 60000 + 5.5 * 3600000;
+  return new Date(istMs).toISOString().slice(0, 10);
+}
+
+function formatDateLong(isoDate) {
+  if (!isoDate) return "";
+  const [y, m, d] = isoDate.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+}
+
+/**
+ * Reflect today's attendance state on the home page card, so a user can see
+ * at a glance whether they still need to mark attendance.
+ */
+function updateHomeAttendanceChip(record) {
+  const chip = document.getElementById("home-attendance-chip");
+  const subtitle = document.getElementById("home-attendance-subtitle");
+  if (!chip || !subtitle) return;
+
+  if (!record) {
+    chip.classList.add("hidden");
+    subtitle.textContent = I18N[state.currentLanguage] && I18N[state.currentLanguage].attendance_home_sub
+      ? I18N[state.currentLanguage].attendance_home_sub
+      : "Submit your name, position, block number, photo and live location.";
+    return;
+  }
+
+  const style = ATTENDANCE_STATUS_STYLES[record.status] || ATTENDANCE_STATUS_STYLES.PENDING;
+  chip.className = `shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold ${style.chip}`;
+  chip.textContent = style.label;
+  chip.classList.remove("hidden");
+  subtitle.textContent = record.status === "APPROVED"
+    ? "Today's attendance is approved and final."
+    : record.status === "REJECTED"
+      ? "Sent back for correction — tap to fix and resubmit."
+      : "Marked for today. Tap to review or edit your entry.";
+}
+
+/**
+ * Called once the app shell is shown, so the home card already knows today's
+ * status without the user opening the Attendance tab first.
+ */
+async function refreshHomeAttendanceStatus() {
+  const raw = state.currentUser && state.currentUser.mobile_number;
+  const digits = String(raw || "").replace(/\D/g, "").slice(-10);
+  if (digits.length !== 10) return;
+  try {
+    const res = await apiFetch(`/api/attendance/lookup?mobile=${digits}`);
+    const data = await res.json();
+    if (data.success) updateHomeAttendanceChip(data.record);
+  } catch (err) {
+    /* the card simply stays in its default state */
+  }
+}
+
+function initAttendanceView() {
+  const todayLabel = document.getElementById("attendance-today-label");
+  if (todayLabel) todayLabel.textContent = formatDateLong(todayIstString());
+
+  const mobileInput = document.getElementById("att-mobile");
+  if (!mobileInput) return;
+
+  // Prefill from the signed-in functionary's own verified mobile number.
+  if (!mobileInput.value && state.currentUser && state.currentUser.mobile_number) {
+    const digits = String(state.currentUser.mobile_number).replace(/\D/g, "").slice(-10);
+    if (digits.length === 10) mobileInput.value = digits;
+  }
+  if (!mobileInput.value && state.currentUser && state.currentUser.name && !document.getElementById("att-name").value) {
+    document.getElementById("att-name").value = state.currentUser.name;
+  }
+
+  if (mobileInput.value.length === 10) {
+    lookupAttendance(mobileInput.value);
+  }
+  if (!state.attendance.location) {
+    captureAttendanceLocation({ silent: true });
+  }
+}
+
+function handleAttendanceMobileInput() {
+  const input = document.getElementById("att-mobile");
+  input.value = input.value.replace(/\D/g, "").slice(0, 10);
+
+  clearTimeout(state.attendance.lookupTimer);
+  if (input.value.length !== 10) {
+    state.attendance.record = null;
+    renderAttendanceState();
+    return;
+  }
+  state.attendance.lookupTimer = setTimeout(() => lookupAttendance(input.value), 250);
+}
+
+async function lookupAttendance(mobile) {
+  try {
+    const res = await apiFetch(`/api/attendance/lookup?mobile=${encodeURIComponent(mobile)}`);
+    const data = await res.json();
+    if (!data.success) return;
+
+    state.attendance.record = data.record || null;
+    state.attendance.editing = false;
+
+    // Carry forward name / position / block: today's record wins, otherwise
+    // the most recent previous submission.
+    const source = data.record || data.profile;
+    if (source) {
+      const nameEl = document.getElementById("att-name");
+      const blockEl = document.getElementById("att-block");
+      if (nameEl && !nameEl.value) nameEl.value = source.name || "";
+      if (blockEl && !blockEl.value) blockEl.value = source.block_number || "";
+      const posRadio = document.querySelector(`input[name="att-position"][value="${source.position}"]`);
+      if (posRadio && !document.querySelector('input[name="att-position"]:checked')) {
+        posRadio.checked = true;
+        handleAttendancePositionChange();
+      }
+      if (!data.record && data.profile) {
+        showToast(`Details carried forward from ${formatDateLong(data.profile.from_date)}.`);
+      }
+    }
+    renderAttendanceState();
+  } catch (err) {
+    // A failed lookup must never block a fresh submission.
+    console.warn("Attendance lookup failed", err);
+  }
+}
+
+function handleAttendancePositionChange() {
+  const picked = document.querySelector('input[name="att-position"]:checked');
+  const label = document.getElementById("att-block-label");
+  const hint = document.getElementById("att-block-hint");
+  const input = document.getElementById("att-block");
+  if (!picked || !label) return;
+
+  if (picked.value === "Supervisor") {
+    label.innerHTML = `Supervisory Circle Number <span class="text-error">*</span>`;
+    if (input) input.placeholder = "e.g. 07";
+    if (hint) hint.textContent = "The Supervisory Circle number assigned to you.";
+  } else {
+    label.innerHTML = `HLB Number <span class="text-error">*</span>`;
+    if (input) input.placeholder = "e.g. 0142";
+    if (hint) hint.textContent = "The House Listing Block number assigned to you.";
+  }
+}
+
+/**
+ * Downscale a camera photo before upload. Field staff are on mobile data and
+ * a raw 12-megapixel capture is 4-6 MB; 1280px JPEG is 200-400 KB and still
+ * perfectly clear for identity verification.
+ */
+async function downscaleImage(file, maxDim = 1280, quality = 0.82) {
+  const bitmap = await (window.createImageBitmap
+    ? createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => createImageBitmap(file))
+    : new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = URL.createObjectURL(file);
+      }));
+
+  const w = bitmap.width || bitmap.naturalWidth;
+  const h = bitmap.height || bitmap.naturalHeight;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(w * scale);
+  canvas.height = Math.round(h * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  if (bitmap.close) bitmap.close();
+
+  return new Promise(resolve => canvas.toBlob(b => resolve(b || file), "image/jpeg", quality));
+}
+
+async function handleAttendancePhotoPick(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+
+  if (!file.type.startsWith("image/")) {
+    showToast("Please choose an image file.");
+    input.value = "";
+    return;
+  }
+
+  try {
+    const blob = await downscaleImage(file);
+    state.attendance.photoBlob = blob;
+    state.attendance.photoName = "attendance.jpg";
+
+    const preview = document.getElementById("att-photo-preview");
+    if (preview.dataset.objectUrl) URL.revokeObjectURL(preview.dataset.objectUrl);
+    const url = URL.createObjectURL(blob);
+    preview.dataset.objectUrl = url;
+    preview.src = url;
+
+    document.getElementById("att-photo-empty").classList.add("hidden");
+    document.getElementById("att-photo-preview-wrap").classList.remove("hidden");
+    document.getElementById("att-photo-caption").textContent = "New photo ready to submit";
+    document.getElementById("att-photo-size").textContent = `${Math.round(blob.size / 1024)} KB`;
+  } catch (err) {
+    showToast("Could not read that photo. Please try again.");
+  } finally {
+    input.value = "";  // let the same file be re-picked
+  }
+}
+
+function captureAttendanceLocation(options = {}) {
+  const { silent = false } = options;
+  const icon = document.getElementById("att-location-icon");
+  const title = document.getElementById("att-location-title");
+  const detail = document.getElementById("att-location-detail");
+  const btn = document.getElementById("att-location-btn");
+  const mapLink = document.getElementById("att-location-map-link");
+  if (!title) return;
+
+  if (!navigator.geolocation) {
+    title.textContent = "Location not supported";
+    detail.textContent = "This device or browser cannot provide GPS coordinates.";
+    return;
+  }
+  if (!window.isSecureContext && location.protocol !== "file:") {
+    title.textContent = "Location blocked (insecure connection)";
+    detail.textContent = "Open the app over HTTPS — browsers only give GPS access on a secure connection.";
+    if (icon) { icon.textContent = "location_off"; icon.className = "material-symbols-outlined text-error"; }
+    return;
+  }
+
+  if (btn) { btn.disabled = true; btn.textContent = "Locating..."; }
+  title.textContent = "Reading your location...";
+  detail.textContent = "Keep the app open and stay outdoors if possible.";
+  if (icon) { icon.textContent = "my_location"; icon.className = "material-symbols-outlined text-primary animate-pulse"; }
+
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      state.attendance.location = { latitude, longitude, accuracy };
+
+      title.textContent = "Location captured";
+      detail.textContent = `${latitude.toFixed(6)}, ${longitude.toFixed(6)} • accurate to ~${Math.round(accuracy)} m`;
+      if (icon) { icon.textContent = "location_on"; icon.className = "material-symbols-outlined text-[#2e7d32]"; }
+      if (btn) { btn.disabled = false; btn.textContent = "Recapture"; }
+      if (mapLink) {
+        mapLink.href = `https://www.google.com/maps?q=${latitude},${longitude}`;
+        mapLink.classList.remove("hidden");
+      }
+    },
+    err => {
+      const messages = {
+        1: "Location permission denied. Allow location access for this app and tap Capture again.",
+        2: "Your location is unavailable right now. Move to an open area and retry.",
+        3: "Location request timed out. Please tap Capture again."
+      };
+      title.textContent = "Location not captured";
+      detail.textContent = messages[err.code] || "Could not read your location.";
+      if (icon) { icon.textContent = "location_off"; icon.className = "material-symbols-outlined text-error"; }
+      if (btn) { btn.disabled = false; btn.textContent = "Capture"; }
+      if (!silent) showToast(detail.textContent);
+    },
+    { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+  );
+}
+
+async function handleAttendanceSubmit(event) {
+  event.preventDefault();
+
+  const mobile = (document.getElementById("att-mobile").value || "").replace(/\D/g, "");
+  const name = (document.getElementById("att-name").value || "").trim();
+  const position = (document.querySelector('input[name="att-position"]:checked') || {}).value;
+  const block = (document.getElementById("att-block").value || "").trim();
+
+  if (mobile.length !== 10) return showToast("Enter a valid 10-digit mobile number.");
+  if (name.length < 2) return showToast("Enter your full name.");
+  if (!position) return showToast("Select whether you are an Enumerator or a Supervisor.");
+  if (!block) return showToast("Enter your HLB / Supervisory Circle number.");
+  if (!state.attendance.location) return showToast("Capture your current location before submitting.");
+
+  const existing = state.attendance.record;
+  if (!existing && !state.attendance.photoBlob) {
+    return showToast("Take a photo before submitting.");
+  }
+
+  const form = new FormData();
+  form.append("mobile_number", mobile);
+  form.append("name", name);
+  form.append("position", position);
+  form.append("block_number", block);
+  form.append("latitude", state.attendance.location.latitude);
+  form.append("longitude", state.attendance.location.longitude);
+  if (state.attendance.location.accuracy != null) {
+    form.append("accuracy_m", state.attendance.location.accuracy);
+  }
+  if (state.attendance.photoBlob) {
+    form.append("photo", state.attendance.photoBlob, state.attendance.photoName || "attendance.jpg");
+  }
+
+  const btn = document.getElementById("att-submit-btn");
+  const label = document.getElementById("att-submit-label");
+  const originalLabel = label.textContent;
+  btn.disabled = true;
+  label.textContent = "Submitting...";
+
+  try {
+    const res = await apiFetch("/api/attendance/submit", { method: "POST", body: form });
+    const data = await res.json();
+
+    if (!data.success) {
+      showToast(data.error || "Could not submit attendance.");
+      if (data.locked && data.record) {
+        state.attendance.record = data.record;
+        state.attendance.editing = false;
+        renderAttendanceState();
+      }
+      return;
+    }
+
+    state.attendance.record = data.record;
+    state.attendance.editing = false;
+    state.attendance.photoBlob = null;
+    clearAttendancePhotoPreview();
+    renderAttendanceState();
+    showToast(data.created ? "Attendance submitted." : "Attendance updated — still one entry for today.");
+  } catch (err) {
+    showToast("Network error. Check your connection and try again.");
+  } finally {
+    btn.disabled = false;
+    label.textContent = originalLabel;
+  }
+}
+
+function clearAttendancePhotoPreview() {
+  const preview = document.getElementById("att-photo-preview");
+  if (preview && preview.dataset.objectUrl) {
+    URL.revokeObjectURL(preview.dataset.objectUrl);
+    delete preview.dataset.objectUrl;
+    preview.removeAttribute("src");
+  }
+  const emptyEl = document.getElementById("att-photo-empty");
+  const wrapEl = document.getElementById("att-photo-preview-wrap");
+  if (emptyEl) emptyEl.classList.remove("hidden");
+  if (wrapEl) wrapEl.classList.add("hidden");
+}
+
+function resetAttendanceForm() {
+  document.getElementById("att-name").value = "";
+  document.getElementById("att-block").value = "";
+  document.querySelectorAll('input[name="att-position"]').forEach(r => { r.checked = false; });
+  state.attendance.photoBlob = null;
+  clearAttendancePhotoPreview();
+  showToast("Form cleared. Your submitted entry is unchanged.");
+}
+
+function enableAttendanceEdit() {
+  state.attendance.editing = true;
+  renderAttendanceState();
+  document.getElementById("attendance-form").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+/**
+ * Single place that decides what the Attendance tab shows: the form, the
+ * read-only summary of an already-submitted entry, and the status banner.
+ */
+function renderAttendanceState() {
+  const record = state.attendance.record;
+  const banner = document.getElementById("attendance-status-banner");
+  const summary = document.getElementById("attendance-summary");
+  const form = document.getElementById("attendance-form");
+  const submitLabel = document.getElementById("att-submit-label");
+  const editBtn = document.getElementById("att-edit-btn");
+  if (!banner || !summary || !form) return;
+
+  updateHomeAttendanceChip(record);
+
+  if (!record) {
+    banner.classList.add("hidden");
+    summary.classList.add("hidden");
+    form.classList.remove("hidden");
+    if (submitLabel) submitLabel.textContent = "Submit Attendance";
+    return;
+  }
+
+  const style = ATTENDANCE_STATUS_STYLES[record.status] || ATTENDANCE_STATUS_STYLES.PENDING;
+  const locked = record.status === "APPROVED";
+
+  // ---- Banner ----
+  let bannerBody = "";
+  if (record.status === "APPROVED") {
+    bannerBody = `Your attendance for ${escapeHtml(formatDateLong(record.attendance_date))} has been approved by the
+      Technical Assistant and is now final. Your photo has been deleted from the server.`;
+  } else if (record.status === "REJECTED") {
+    bannerBody = `Your entry was sent back for correction.<br><strong>Reason:</strong>
+      ${escapeHtml(record.reject_reason || "Not specified")}<br>Correct the details below and resubmit.`;
+  } else {
+    bannerBody = `Your attendance for ${escapeHtml(formatDateLong(record.attendance_date))} is recorded and waiting for
+      the Technical Assistant to review it. You can still edit and resubmit until then.`;
+  }
+  banner.className = `rounded-2xl p-4 border flex items-start gap-3 ${style.banner}`;
+  banner.innerHTML = `
+    <span class="material-symbols-outlined ${style.iconClass} mt-0.5">${style.icon}</span>
+    <div class="text-sm text-on-surface leading-relaxed">
+      <p class="font-bold mb-0.5">${escapeHtml(style.label)}</p>
+      <p class="text-on-surface-variant">${bannerBody}</p>
+    </div>`;
+  banner.classList.remove("hidden");
+
+  // ---- Summary ----
+  document.getElementById("att-summary-date").textContent = formatDateLong(record.attendance_date);
+  document.getElementById("att-summary-meta").textContent =
+    `Submitted ${record.submitted_at || "—"}${record.submission_count > 1 ? ` • edited ${record.submission_count - 1} time(s)` : ""}`;
+
+  const statusChip = document.getElementById("att-summary-status");
+  statusChip.className = `shrink-0 px-2.5 py-1 rounded-full text-[10px] font-bold ${style.chip}`;
+  statusChip.textContent = style.label;
+
+  const blockLabel = record.position === "Supervisor" ? "Supervisory Circle" : "HLB Number";
+  document.getElementById("att-summary-fields").innerHTML = `
+    <div><dt class="text-xs text-on-surface-variant">Name</dt><dd class="font-semibold text-on-surface">${escapeHtml(record.name)}</dd></div>
+    <div><dt class="text-xs text-on-surface-variant">Position</dt><dd class="font-semibold text-on-surface">${escapeHtml(record.position)}</dd></div>
+    <div><dt class="text-xs text-on-surface-variant">${blockLabel}</dt><dd class="font-semibold text-on-surface">${escapeHtml(record.block_number)}</dd></div>
+    <div><dt class="text-xs text-on-surface-variant">Mobile</dt><dd class="font-semibold text-on-surface">+91 ${escapeHtml(record.mobile_number)}</dd></div>
+    <div class="sm:col-span-2"><dt class="text-xs text-on-surface-variant">Location</dt>
+      <dd class="font-semibold text-on-surface">
+        ${Number(record.latitude).toFixed(6)}, ${Number(record.longitude).toFixed(6)}
+        <a href="${escapeAttr(record.maps_link)}" target="_blank" rel="noopener noreferrer"
+           class="ml-1 text-primary font-semibold hover:underline">View on map</a>
+      </dd></div>`;
+  summary.classList.remove("hidden");
+  if (editBtn) editBtn.classList.toggle("hidden", locked);
+
+  // ---- Form visibility ----
+  const showForm = !locked && (state.attendance.editing || record.status === "REJECTED");
+  form.classList.toggle("hidden", !showForm);
+  if (submitLabel) submitLabel.textContent = "Update Attendance";
+
+  if (showForm) {
+    document.getElementById("att-mobile").value = record.mobile_number;
+    document.getElementById("att-name").value = record.name;
+    document.getElementById("att-block").value = record.block_number;
+    const posRadio = document.querySelector(`input[name="att-position"][value="${record.position}"]`);
+    if (posRadio) posRadio.checked = true;
+    handleAttendancePositionChange();
+    const caption = document.getElementById("att-photo-caption");
+    if (caption && !state.attendance.photoBlob && record.has_photo) {
+      document.getElementById("att-photo-empty").classList.remove("hidden");
+      caption.textContent = "Photo already on file";
+    }
+  }
+}
+
+// ==================== 9c. FIELD ATTENDANCE (ADMIN SIDE) ====================
+
+function setAttendanceStatusFilter(status) {
+  state.adminAttendance.status = status;
+  loadAdminAttendance();
+}
+
+function debounceAdminAttendanceSearch() {
+  clearTimeout(state.adminAttendance.searchTimer);
+  state.adminAttendance.searchTimer = setTimeout(loadAdminAttendance, 300);
+}
+
+function currentAttendanceFilters() {
+  const val = id => (document.getElementById(id) || {}).value || "";
+  return {
+    status: state.adminAttendance.status,
+    position: val("att-filter-position"),
+    date_from: val("att-filter-from"),
+    date_to: val("att-filter-to"),
+    q: val("att-filter-q").trim()
+  };
+}
+
+function attendanceFilterQuery() {
+  const f = currentAttendanceFilters();
+  return Object.entries(f)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+    .join("&");
+}
+
+async function loadAdminAttendance() {
+  const tbody = document.getElementById("admin-attendance-table-body");
+  if (!tbody) return;
+
+  // Reflect the active status chip
+  [["", "all"], ["PENDING", "pending"], ["APPROVED", "approved"], ["REJECTED", "rejected"]].forEach(([value, key]) => {
+    const chip = document.getElementById(`att-chip-${key}`);
+    if (!chip) return;
+    const active = state.adminAttendance.status === value;
+    chip.classList.toggle("bg-primary", active);
+    chip.classList.toggle("text-white", active);
+    chip.classList.toggle("border-primary", active);
+    chip.classList.toggle("text-on-surface-variant", !active);
+  });
+
+  try {
+    const res = await apiFetch(`/api/admin/attendance?${attendanceFilterQuery()}&limit=200`);
+    const data = await res.json();
+
+    if (!data.success) {
+      tbody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-error">${escapeHtml(data.error || "Could not load the register.")}</td></tr>`;
+      return;
+    }
+
+    const s = data.summary || {};
+    const setCount = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n || 0; };
+    setCount("att-count-all", s.all);
+    setCount("att-count-pending", s.pending);
+    setCount("att-count-approved", s.approved);
+    setCount("att-count-rejected", s.rejected);
+
+    tbody.innerHTML = "";
+    if (!data.records.length) {
+      tbody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-on-surface-variant">No attendance entries match these filters.</td></tr>`;
+      document.getElementById("admin-attendance-footer").textContent = "";
+      return;
+    }
+
+    data.records.forEach(rec => {
+      const style = ATTENDANCE_STATUS_STYLES[rec.status] || ATTENDANCE_STATUS_STYLES.PENDING;
+
+      let photoCell;
+      if (rec.has_photo) {
+        photoCell = `<button onclick="openAttendancePhoto(${rec.id}, '${escapeAttr(rec.name)}', '${escapeAttr(rec.attendance_date)}')"
+            class="text-primary font-semibold hover:underline flex items-center gap-1">
+            <span class="material-symbols-outlined text-base">image</span> View</button>`;
+      } else if (rec.photo_deleted) {
+        photoCell = `<span class="text-on-surface-variant flex items-center gap-1" title="Deleted automatically on approval">
+            <span class="material-symbols-outlined text-base">delete_forever</span> Deleted</span>`;
+      } else {
+        photoCell = `<span class="text-on-surface-variant">—</span>`;
+      }
+
+      const reviewCell = rec.status === "PENDING"
+        ? `<div class="flex items-center justify-end gap-1.5">
+             <button onclick="approveAttendance(${rec.id})"
+               class="text-[11px] font-semibold px-2.5 py-1 rounded border border-[#2e7d32]/40 text-[#2e7d32] hover:bg-[#2e7d32]/10 transition-all">Approve</button>
+             <button onclick="openAttendanceRejectModal(${rec.id}, '${escapeAttr(rec.name)} — ${escapeAttr(rec.attendance_date)}')"
+               class="text-[11px] font-semibold px-2.5 py-1 rounded border border-error/40 text-error hover:bg-error-container/30 transition-all">Reject</button>
+           </div>`
+        : `<div class="flex items-center justify-end gap-1.5">
+             <span class="text-[10px] text-on-surface-variant">${escapeHtml(rec.reviewed_by || "")}</span>
+             <button onclick="deleteAttendanceRecord(${rec.id}, '${escapeAttr(rec.name)}')" title="Delete this entry"
+               class="text-on-surface-variant hover:text-error p-1 rounded transition-colors">
+               <span class="material-symbols-outlined text-base">delete</span></button>
+           </div>`;
+
+      const tr = document.createElement("tr");
+      tr.className = "hover:bg-surface-container-low transition-colors align-top";
+      tr.innerHTML = `
+        <td class="p-3 font-mono text-[11px] text-on-surface-variant whitespace-nowrap">${escapeHtml(rec.attendance_date)}</td>
+        <td class="p-3 font-bold text-on-surface">${escapeHtml(rec.name)}
+          ${rec.submission_count > 1 ? `<span class="ml-1 text-[10px] font-normal text-on-surface-variant">(edited ${rec.submission_count - 1}×)</span>` : ""}
+          ${rec.reject_reason ? `<div class="text-[10px] text-error font-normal mt-0.5">${escapeHtml(rec.reject_reason)}</div>` : ""}
+        </td>
+        <td class="p-3 text-on-surface-variant whitespace-nowrap">${escapeHtml(rec.mobile_number)}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(rec.position)}</td>
+        <td class="p-3 font-mono text-on-surface">${escapeHtml(rec.block_number)}</td>
+        <td class="p-3">
+          <a href="${escapeAttr(rec.maps_link)}" target="_blank" rel="noopener noreferrer"
+             class="text-primary font-semibold hover:underline whitespace-nowrap">
+            ${Number(rec.latitude).toFixed(4)}, ${Number(rec.longitude).toFixed(4)}</a>
+          ${rec.accuracy_m ? `<div class="text-[10px] text-on-surface-variant">±${Math.round(rec.accuracy_m)} m</div>` : ""}
+        </td>
+        <td class="p-3">${photoCell}</td>
+        <td class="p-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${style.chip}">${escapeHtml(style.label)}</span></td>
+        <td class="p-3 text-right">${reviewCell}</td>`;
+      tbody.appendChild(tr);
+    });
+
+    document.getElementById("admin-attendance-footer").textContent =
+      `Showing ${data.records.length} of ${data.total} matching entries.`;
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="9" class="p-4 text-center text-error">Error loading the attendance register.</td></tr>`;
+  }
+}
+
+/**
+ * Photos are admin-gated, so they cannot be loaded with a plain <img src>
+ * (no Authorization header). Fetch the bytes with the bearer token and hand
+ * the <img> an object URL instead.
+ */
+async function openAttendancePhoto(recordId, name, date) {
+  const modal = document.getElementById("modal-attendance-photo");
+  const img = document.getElementById("att-photo-modal-img");
+  document.getElementById("att-photo-modal-title").textContent = name || "Attendance photo";
+  document.getElementById("att-photo-modal-sub").textContent = date ? formatDateLong(date) : "";
+  img.removeAttribute("src");
+  modal.classList.remove("hidden");
+
+  try {
+    const res = await apiFetch(`/api/admin/attendance/${recordId}/photo`);
+    if (!res.ok) {
+      showToast("This photo is no longer on the server.");
+      closeAttendancePhotoModal();
+      return;
+    }
+    const blob = await res.blob();
+    if (state.adminAttendance.photoObjectUrl) URL.revokeObjectURL(state.adminAttendance.photoObjectUrl);
+    state.adminAttendance.photoObjectUrl = URL.createObjectURL(blob);
+    img.src = state.adminAttendance.photoObjectUrl;
+  } catch (err) {
+    showToast("Could not load the photo.");
+    closeAttendancePhotoModal();
+  }
+}
+
+function closeAttendancePhotoModal() {
+  document.getElementById("modal-attendance-photo").classList.add("hidden");
+  if (state.adminAttendance.photoObjectUrl) {
+    URL.revokeObjectURL(state.adminAttendance.photoObjectUrl);
+    state.adminAttendance.photoObjectUrl = null;
+  }
+}
+
+async function approveAttendance(recordId) {
+  try {
+    const res = await apiFetch(`/api/admin/attendance/${recordId}/approve`, { method: "POST" });
+    const data = await res.json();
+    showToast(data.success ? data.message : (data.error || "Could not approve this entry."));
+    if (data.success) loadAdminAttendance();
+  } catch (err) {
+    showToast("Network error while approving.");
+  }
+}
+
+function openAttendanceRejectModal(recordId, label) {
+  state.adminAttendance.rejectTargetId = recordId;
+  document.getElementById("att-reject-target").textContent = label || "";
+  document.getElementById("att-reject-reason").value = "";
+  document.getElementById("modal-attendance-reject").classList.remove("hidden");
+}
+
+function closeAttendanceRejectModal() {
+  state.adminAttendance.rejectTargetId = null;
+  document.getElementById("modal-attendance-reject").classList.add("hidden");
+}
+
+async function confirmAttendanceReject() {
+  const recordId = state.adminAttendance.rejectTargetId;
+  const reason = (document.getElementById("att-reject-reason").value || "").trim();
+  if (!recordId) return;
+  if (!reason) return showToast("Give a reason so the user knows what to correct.");
+
+  try {
+    const res = await apiFetch(`/api/admin/attendance/${recordId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason })
+    });
+    const data = await res.json();
+    showToast(data.success ? data.message : (data.error || "Could not reject this entry."));
+    if (data.success) {
+      closeAttendanceRejectModal();
+      loadAdminAttendance();
+    }
+  } catch (err) {
+    showToast("Network error while rejecting.");
+  }
+}
+
+async function deleteAttendanceRecord(recordId, name) {
+  if (!confirm(`Permanently delete the attendance entry for ${name}? This cannot be undone.`)) return;
+  try {
+    const res = await apiFetch(`/api/admin/attendance/${recordId}`, { method: "DELETE" });
+    const data = await res.json();
+    showToast(data.success ? data.message : (data.error || "Could not delete the entry."));
+    if (data.success) loadAdminAttendance();
+  } catch (err) {
+    showToast("Network error while deleting.");
+  }
+}
+
+/**
+ * Export the filtered register as ONE Excel workbook containing every user's
+ * entries. Fetched as a blob because the endpoint is bearer-token gated.
+ */
+async function exportAttendanceExcel(btn) {
+  const original = btn ? btn.innerHTML : "";
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="material-symbols-outlined text-base animate-spin">progress_activity</span><span>Building...</span>`;
+  }
+
+  try {
+    const res = await apiFetch(`/api/admin/attendance/export?${attendanceFilterQuery()}`);
+    if (!res.ok) {
+      showToast("Could not build the Excel file.");
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match ? match[1] : `Census_Attendance_${todayIstString()}.xlsx`;
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    showToast(`Downloaded ${filename}`);
+  } catch (err) {
+    showToast("Network error while exporting.");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = original;
+    }
   }
 }
 

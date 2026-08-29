@@ -22,6 +22,7 @@ from .ingestion import (
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query
 from .auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
+from . import attendance
 from .messaging_gateway import (
     handle_whatsapp_webhook, handle_telegram_webhook, get_channel_status,
     WHATSAPP_VERIFY_TOKEN, TECH_ASSISTANT_NAME, TECH_ASSISTANT_PHONE, WHATSAPP_DEEP_LINK,
@@ -1077,6 +1078,177 @@ def admin_delete_file(filename):
     except Exception as e:
         logger.error(f"File delete error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+# ----------------- Field Attendance Endpoints -----------------
+#
+# Public (field-user) side: a person marks attendance against their own mobile
+# number. The (mobile_number, attendance_date) uniqueness constraint in
+# attendance_records means a resubmission always overwrites that day's row —
+# the register can never accumulate duplicates for the same person on the same
+# day. Admin side is gated by _require_admin() exactly like every other
+# /api/admin/* route.
+
+@app.route("/api/attendance/lookup", methods=["GET"])
+def attendance_lookup():
+    """
+    Prefill helper for the Attendance tab: returns today's record for a mobile
+    number (if one exists) plus the name/position/block carried forward from
+    that person's most recent submission.
+    """
+    mobile = request.args.get("mobile", "")
+    if not attendance.normalize_mobile(mobile):
+        return jsonify({"success": False, "error": "Enter a valid 10-digit mobile number."}), 400
+
+    return jsonify({
+        "success": True,
+        "date": attendance.today_ist(),
+        "record": attendance.get_attendance(mobile),
+        "profile": attendance.get_carry_forward_profile(mobile),
+    })
+
+@app.route("/api/attendance/submit", methods=["POST"])
+def attendance_submit():
+    """
+    Create or update today's attendance. Accepts multipart/form-data with an
+    optional 'photo' file (required only when today's row does not exist yet).
+    """
+    user = _authenticated_user()
+    body, status = attendance.submit_attendance(
+        form=request.form,
+        photo_file=request.files.get("photo"),
+        user_id=(user or {}).get("sub"),
+    )
+
+    if body.get("success"):
+        try:
+            record = body.get("record", {})
+            conn = get_db_connection()
+            conn.execute("""
+                INSERT INTO activity_logs (user_id, action_type, query_text, source_tag)
+                VALUES (?, 'attendance', ?, ?)
+            """, (
+                record.get("mobile_number"),
+                f"{record.get('name')} • {record.get('position')} • {record.get('block_number')}",
+                "Attendance submitted" if body.get("created") else "Attendance updated",
+            ))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Attendance activity log failed: {e}")
+
+    return jsonify(body), status
+
+@app.route("/api/admin/attendance", methods=["GET"])
+def admin_attendance_list():
+    """Filtered attendance register for the admin console."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    filters = {
+        "status": request.args.get("status", ""),
+        "position": request.args.get("position", ""),
+        "date_from": request.args.get("date_from", ""),
+        "date_to": request.args.get("date_to", ""),
+        "q": request.args.get("q", ""),
+    }
+    try:
+        limit = min(int(request.args.get("limit", 200)), 500)
+        offset = max(int(request.args.get("offset", 0)), 0)
+    except ValueError:
+        limit, offset = 200, 0
+
+    result = attendance.list_attendance(filters, limit=limit, offset=offset)
+    result["success"] = True
+    return jsonify(result)
+
+@app.route("/api/admin/attendance/<int:record_id>/photo", methods=["GET"])
+def admin_attendance_photo(record_id):
+    """
+    Serve an attendance photo to the admin only. Returns 404 once the record
+    has been approved — approval deletes the file from disk permanently.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    path = attendance.get_photo_for_record(record_id)
+    if not path:
+        return jsonify({"success": False, "error": "No photo available for this record."}), 404
+    return send_from_directory(os.path.dirname(path), os.path.basename(path))
+
+@app.route("/api/admin/attendance/<int:record_id>/approve", methods=["POST"])
+def admin_attendance_approve(record_id):
+    """Approve a record. Deletes its photo from the server and locks the row."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    reviewer = (_authenticated_user() or {}).get("name", "Admin")
+    body, status = attendance.review_attendance(record_id, "approve", reviewer)
+    return jsonify(body), status
+
+@app.route("/api/admin/attendance/<int:record_id>/reject", methods=["POST"])
+def admin_attendance_reject(record_id):
+    """Reject a record with a reason. Photo is kept so the user can correct it."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    data = request.get_json(silent=True) or {}
+    reviewer = (_authenticated_user() or {}).get("name", "Admin")
+    body, status = attendance.review_attendance(record_id, "reject", reviewer, data.get("reason", ""))
+    return jsonify(body), status
+
+@app.route("/api/admin/attendance/<int:record_id>", methods=["DELETE"])
+def admin_attendance_delete(record_id):
+    """Permanently remove an attendance record and any photo it still holds."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    body, status = attendance.delete_attendance(record_id)
+    return jsonify(body), status
+
+@app.route("/api/admin/attendance/export", methods=["GET"])
+def admin_attendance_export():
+    """
+    Download the whole (filtered) attendance register as ONE Excel workbook —
+    every user's submissions live in the same sheet, one row each per day.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    filters = {
+        "status": request.args.get("status", ""),
+        "position": request.args.get("position", ""),
+        "date_from": request.args.get("date_from", ""),
+        "date_to": request.args.get("date_to", ""),
+        "q": request.args.get("q", ""),
+    }
+    try:
+        buffer, filename = attendance.build_attendance_workbook(filters)
+    except Exception as e:
+        logger.error(f"Attendance export failed: {e}")
+        return jsonify({"success": False, "error": "Could not build the Excel file."}), 500
+
+    return Response(
+        buffer.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@app.route("/api/admin/attendance/purge-photos", methods=["POST"])
+def admin_attendance_purge_photos():
+    """Housekeeping: delete photo files on disk that no record points at."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    removed = attendance.purge_orphaned_photos()
+    return jsonify({"success": True, "removed": removed,
+                    "message": f"Removed {removed} orphaned photo file(s)."})
 
 # ----------------- Messaging & Webhook Endpoints -----------------
 @app.route("/api/channels/status", methods=["GET"])

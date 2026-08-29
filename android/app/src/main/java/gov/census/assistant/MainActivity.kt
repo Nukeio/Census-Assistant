@@ -53,14 +53,7 @@ class MainActivity : AppCompatActivity() {
     // Activity Result Launchers
     // ─────────────────────────────────────────────
 
-    /** CALL_PHONE permission (for tel: links). */
-    private val callPhonePermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (!isGranted) {
-            Toast.makeText(this, "Phone permission needed to call support", Toast.LENGTH_SHORT).show()
-        }
-    }
+
 
     /**
      * Multi-permission launcher for CAMERA + LOCATION.
@@ -658,15 +651,11 @@ class MainActivity : AppCompatActivity() {
     // ─────────────────────────────────────────────
 
     private fun handlePhoneCall(telUrl: String) {
-        if (hasPermission(Manifest.permission.CALL_PHONE)) {
-            val intent = Intent(Intent.ACTION_CALL, Uri.parse(telUrl))
-            startActivity(intent)
-        } else {
-            // Request permission, then show dial intent as fallback
-            callPhonePermissionLauncher.launch(Manifest.permission.CALL_PHONE)
-            // Fallback: show dial pad (no CALL_PHONE needed)
+        try {
             val intent = Intent(Intent.ACTION_DIAL, Uri.parse(telUrl))
             startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Unable to open phone dialer", Toast.LENGTH_SHORT).show()
         }
     }
 

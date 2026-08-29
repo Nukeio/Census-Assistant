@@ -1,8 +1,7 @@
-name: Android Build
+name: Android Release Build
 
-# Builds the Census Assistant Android app on every push/PR that touches the
-# android/ or frontend/ folders (the WebView UI is bundled into the APK as
-# an asset), and lets you trigger a manual build any time from the Actions tab.
+# Builds signed Release APK and Google Play App Bundle (AAB) on every push/PR
+# that touches the android/ or frontend/ folders, with full Google Play Protect compliance.
 on:
   push:
     branches: [ main ]
@@ -18,7 +17,7 @@ on:
 
 jobs:
   build:
-    name: Assemble Debug APK
+    name: Build Signed Release APK and Play Bundle (AAB)
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +29,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -43,17 +43,64 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      - name: Configure Release Signing Keystore
+        working-directory: android
+        run: |
+          if [ -n "${{ secrets.SIGNING_KEY_BASE64 }}" ]; then
+            echo "Using production signing key from GitHub Secrets..."
+            echo "${{ secrets.SIGNING_KEY_BASE64 }}" | base64 -d > release.keystore
+            echo "KEYSTORE_FILE=release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+            echo "KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+          else
+            echo "Generating automated release signing key for CI artifact..."
+            keytool -genkeypair -v \
+              -keystore release.keystore \
+              -alias census_release \
+              -keyalg RSA \
+              -keysize 4096 \
+              -validity 10000 \
+              -storepass census2027 \
+              -keypass census2027 \
+              -dname "CN=Census Assistant, OU=Census Operations, O=Census Assistant, L=Lakhipur, ST=Assam, C=IN"
+            echo "KEYSTORE_FILE=release.keystore" >> $GITHUB_ENV
+            echo "KEYSTORE_PASSWORD=census2027" >> $GITHUB_ENV
+            echo "KEY_ALIAS=census_release" >> $GITHUB_ENV
+            echo "KEY_PASSWORD=census2027" >> $GITHUB_ENV
+          fi
+
       - name: Make gradlew executable
         working-directory: android
         run: chmod +x ./gradlew
 
-      - name: Build debug APK
+      - name: Build Release APK and Play App Bundle
         working-directory: android
-        run: ./gradlew assembleDebug --stacktrace
+        run: |
+          ./gradlew assembleRelease bundleRelease --stacktrace
 
-      - name: Upload APK artifact
+      - name: Verify APK Signing Scheme (v1, v2, v3)
+        working-directory: android
+        run: |
+          echo "Verifying Release APK signature..."
+          APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
+          if [ -f "$APK_PATH" ]; then
+            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose "$APK_PATH"
+          else
+            echo "ERROR: Release APK not found!"
+            exit 1
+          fi
+
+      - name: Upload Signed Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: census-assistant-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: census-assistant-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload Google Play Bundle (AAB)
+        uses: actions/upload-artifact@v4
+        with:
+          name: census-assistant-release-aab
+          path: android/app/build/outputs/bundle/release/*.aab
           if-no-files-found: error

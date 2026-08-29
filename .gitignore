@@ -19,6 +19,13 @@ android/.idea/
 android/*.iml
 android/captures/
 android/.cxx/
+*.keystore
+*.jks
+*.p12
+keystore.properties
+release.properties
+android/release.keystore
+android/app/release.keystore
 
 # IDE
 .vscode/

@@ -40,28 +40,34 @@ android {
             def propKeyAlias = keystoreProperties['keyAlias']
             def propKeyPassword = keystoreProperties['keyPassword']
 
-            if (envKeystore && file(envKeystore).exists()) {
-                storeFile file(envKeystore)
-                storePassword envKeystorePassword
-                keyAlias envKeyAlias
-                keyPassword envKeyPassword
-            } else if (propKeystore && file(propKeystore).exists()) {
-                storeFile file(propKeystore)
-                storePassword propKeystorePassword
-                keyAlias propKeyAlias
-                keyPassword propKeyPassword
-            } else if (file("${rootDir}/release.keystore").exists()) {
-                storeFile file("${rootDir}/release.keystore")
+            if (envKeystore) {
+                def kFile = file(envKeystore).exists() ? file(envKeystore) : rootProject.file(envKeystore)
+                if (kFile.exists()) {
+                    storeFile kFile
+                    storePassword envKeystorePassword
+                    keyAlias envKeyAlias
+                    keyPassword envKeyPassword
+                }
+            } else if (propKeystore) {
+                def kFile = file(propKeystore).exists() ? file(propKeystore) : rootProject.file(propKeystore)
+                if (kFile.exists()) {
+                    storeFile kFile
+                    storePassword propKeystorePassword
+                    keyAlias propKeyAlias
+                    keyPassword propKeyPassword
+                }
+            } else if (rootProject.file("release.keystore").exists()) {
+                storeFile rootProject.file("release.keystore")
                 storePassword "census2027"
                 keyAlias "census_release"
                 keyPassword "census2027"
             }
 
-            // Explicitly enable modern Android Signature Schemes for full Play Protect compliance
-            v1SigningEnabled true
-            v2SigningEnabled true
-            v3SigningEnabled true
-            v4SigningEnabled true
+            // Android Gradle Plugin property assignments for modern signature schemes (v1, v2, v3, v4)
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
         }
     }
 
@@ -74,7 +80,7 @@ android {
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             
-            // Assign release signing config if storeFile is configured
+            // Assign release signing config if storeFile exists
             if (signingConfigs.release.storeFile != null) {
                 signingConfig signingConfigs.release
             }

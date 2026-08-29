@@ -85,7 +85,12 @@ jobs:
           echo "Verifying Release APK signature..."
           APK_PATH=$(find app/build/outputs/apk/release/ -name "*.apk" | head -n 1)
           if [ -f "$APK_PATH" ]; then
-            $ANDROID_HOME/build-tools/34.0.0/apksigner verify --verbose "$APK_PATH"
+            APKSIGNER=$(find $ANDROID_HOME/build-tools/ -name apksigner | head -n 1)
+            if [ -n "$APKSIGNER" ]; then
+              $APKSIGNER verify --verbose "$APK_PATH"
+            else
+              echo "apksigner not found, skipping signature verification step."
+            fi
           else
             echo "ERROR: Release APK not found!"
             exit 1

@@ -358,6 +358,8 @@ function navigateTo(viewName, updateHash = true) {
     loadNotifications();
   } else if (viewName === "supervisor") {
     loadSupervisors();
+  } else if (viewName === "manual") {
+    loadManualPage();
   }
 }
 
@@ -928,6 +930,135 @@ function closeEnumeratorModal() {
 }
 
 // ==================== 7. MANUALS & GUIDELINES HANDLERS ====================
+// manualTopicsCache holds, per indexed PDF, the distinct section/topic
+// headers extracted during ingestion — [{source_file, doc_title, topics:[{section_header, page_number}]}]
+// It backs both the page-level "Browse Topics" search box and the per-document
+// topic list shown inside the manual detail modal.
+let manualTopicsCache = [];
+
+// Escapes a string for safe embedding inside a single-quoted JS string
+// literal that itself sits inside a double-quoted HTML attribute (the
+// pattern used by every dynamically-built onclick="fn('...')" below).
+// escapeHtml() alone is NOT enough here — the browser decodes HTML entities
+// in attribute values before treating them as JS, so an escaped apostrophe
+// would still terminate the string early.
+function jsAttr(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/"/g, "&quot;")
+    .replace(/\n/g, " ");
+}
+
+async function loadManualPage() {
+  await Promise.all([loadManualDocs(), loadManualTopics()]);
+}
+
+async function loadManualDocs() {
+  const container = document.getElementById("manual-doc-list");
+  if (!container) return;
+  try {
+    const res = await apiFetch("/api/manuals/list");
+    const data = await res.json();
+    const docs = data.manuals || [];
+    if (docs.length === 0) {
+      container.innerHTML = `<p class="text-xs text-on-surface-variant col-span-full">No manuals uploaded yet.</p>`;
+      return;
+    }
+    container.innerHTML = docs.map(doc => `
+      <div onclick="openPdfModal('${jsAttr(doc.filename)}')"
+        class="bg-surface-container-lowest border border-outline-variant/30 rounded-xl p-4 flex items-center justify-between gap-3 cursor-pointer hover:bg-surface-container-low hover:border-primary/40 transition-all active:scale-[0.99]">
+        <div class="flex items-center gap-3 min-w-0">
+          <span class="material-symbols-outlined text-error text-3xl shrink-0">picture_as_pdf</span>
+          <div class="min-w-0">
+            <h4 class="text-sm font-bold text-on-surface truncate">${escapeHtml(doc.title)}</h4>
+            <p class="text-xs text-on-surface-variant">${doc.pages ? `${doc.pages} Pages • ` : ""}${doc.chunk_count} indexed section${doc.chunk_count === 1 ? "" : "s"} • ${escapeHtml(doc.size)}</p>
+          </div>
+        </div>
+        <span class="material-symbols-outlined text-primary shrink-0">chevron_right</span>
+      </div>
+    `).join("");
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-error col-span-full">Could not load manuals.</p>`;
+  }
+}
+
+async function loadManualTopics() {
+  try {
+    const res = await apiFetch("/api/manuals/topics");
+    const data = await res.json();
+    manualTopicsCache = data.documents || [];
+  } catch (err) {
+    manualTopicsCache = [];
+  }
+  renderManualTopics();
+}
+
+// Renders the "Browse Topics" chip list from the cached topic index,
+// filtered client-side by the manual-topics-filter search box. Optionally
+// scoped to one document's source_file (used inside the PDF detail modal).
+function renderManualTopics(filterSourceFile = null) {
+  const container = document.getElementById("manual-topics-list");
+  if (!container) return;
+  const filterInput = document.getElementById("manual-topics-filter");
+  const q = (filterInput ? filterInput.value : "").trim().toLowerCase();
+
+  let rows = [];
+  manualTopicsCache.forEach(doc => {
+    if (filterSourceFile && doc.source_file !== filterSourceFile) return;
+    doc.topics.forEach(topic => {
+      if (q && !topic.section_header.toLowerCase().includes(q)) return;
+      rows.push({ ...topic, source_file: doc.source_file, doc_title: doc.doc_title });
+    });
+  });
+
+  if (rows.length === 0) {
+    container.innerHTML = `<p class="text-xs text-on-surface-variant">${q ? "No matching topics." : "No topics indexed yet."}</p>`;
+    return;
+  }
+
+  container.innerHTML = rows.slice(0, 80).map(t => `
+    <button onclick="viewManualTopic(${t.id}, '${jsAttr(t.section_header)}')"
+      title="${escapeHtml(t.doc_title)} • Page ${t.page_number}"
+      class="text-left text-xs bg-surface border border-outline-variant/30 hover:border-primary hover:text-primary rounded-full px-3.5 py-2 transition-colors">
+      ${escapeHtml(t.section_header)}
+    </button>
+  `).join("");
+}
+
+// Loads the exact indexed chunk for one topic (clicked either from the
+// page-level Browse Topics list or from inside a manual's detail modal),
+// looked up by its row id — not by header text, since a topic's label can
+// be a derived snippet rather than a real stored section_header — and
+// surfaces it in the existing AI Synthesized Excerpt card.
+async function viewManualTopic(chunkId, fallbackLabel) {
+  const titleEl = document.getElementById("manual-answer-title");
+  const bodyEl = document.getElementById("manual-answer-body");
+  const sourceEl = document.getElementById("manual-answer-source");
+
+  titleEl.textContent = fallbackLabel;
+  bodyEl.textContent = "Loading topic content...";
+
+  try {
+    const res = await apiFetch(`/api/manuals/chunk?id=${encodeURIComponent(chunkId)}`);
+    const data = await res.json();
+    if (data.error) {
+      bodyEl.textContent = "Could not load this topic.";
+      return;
+    }
+    titleEl.textContent = data.section_header || fallbackLabel;
+    bodyEl.textContent = data.chunk_text;
+    sourceEl.innerHTML = `Source: <strong>${escapeHtml(data.doc_title)}, Page ${data.page_number}</strong>`;
+  } catch (err) {
+    bodyEl.textContent = "Error loading topic content.";
+  }
+
+  closePdfModal();
+  const answerCard = document.getElementById("manual-ai-answer-card");
+  if (answerCard) answerCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 async function executeManualSearch() {
   const query = document.getElementById("manual-search-input").value.trim();
   if (!query) return;
@@ -946,7 +1077,7 @@ async function executeManualSearch() {
       const best = data.results[0];
       titleEl.textContent = best.section_header || "Relevant Manual Guideline";
       bodyEl.textContent = best.chunk_text;
-      sourceEl.innerHTML = `Source: <strong>${best.doc_title}, Page ${best.page_number}</strong>`;
+      sourceEl.innerHTML = `Source: <strong>${escapeHtml(best.doc_title)}, Page ${best.page_number}</strong>`;
     } else {
       titleEl.textContent = "No Exact Guideline Match";
       bodyEl.textContent = "Please consult the full manuals below or contact Technical Assistant Shahin Sha A. (+91 84534 41975).";
@@ -957,34 +1088,49 @@ async function executeManualSearch() {
   }
 }
 
-function openPdfModal(filename) {
+// Opens the manual detail modal for one document — a real, working modal
+// (the markup for #modal-pdf was previously missing from index.html
+// entirely, so this call silently did nothing before). Shows a genuine link
+// to open the actual PDF plus the real indexed topics for that file, in
+// place of the old hardcoded "Sample Section Overview" placeholder text.
+async function openPdfModal(filename) {
   const modal = document.getElementById("modal-pdf");
   const title = document.getElementById("pdf-modal-title");
   const content = document.getElementById("pdf-modal-content");
+  if (!modal || !title || !content) return;
 
-  title.textContent = filename.includes("FAQ") 
-    ? "Census 2027 FAQ Manual for Enumerators & Supervisors" 
-    : "House Listing Operations (HLO) Instruction Manual";
+  const doc = manualTopicsCache.find(d => d.source_file === filename);
+  const docTitle = (doc && doc.doc_title) || filename;
+  title.textContent = docTitle;
+
+  const fileUrl = `/api/manuals/file/${encodeURIComponent(filename)}`;
+  const topics = doc ? doc.topics : [];
 
   content.innerHTML = `
-    <div class="bg-surface p-6 rounded-xl border border-outline-variant/30 space-y-4">
+    <div class="space-y-4">
       <div class="flex items-center gap-3 p-3 bg-primary-fixed/20 rounded-lg text-primary text-xs font-semibold">
         <span class="material-symbols-outlined">info</span>
-        <span>Offline Indexed Document • 100% Vector & Full-Text Search Enabled</span>
+        <span>Offline Indexed Document • Full-Text Search Enabled</span>
       </div>
-      <h4 class="text-base font-bold text-on-surface">Document: ${filename}</h4>
-      <p class="text-xs text-on-surface-variant leading-relaxed">
-        All pages and sections of this official publication have been indexed into the Census Assistant knowledge repository. 
-        You can ask any procedural question directly to the AI Assistant or search specific keywords.
-      </p>
-      <div class="p-4 bg-surface-container rounded-lg text-xs space-y-2 font-mono">
-        <p class="font-bold text-primary">Sample Section Overview:</p>
-        <p>• Chapter 1: Introduction to Census 2027 & House Listing Operations</p>
-        <p>• Chapter 2: Duties of Enumerators and Charge Supervisors</p>
-        <p>• Chapter 3: Definition of Building, Census House, and Household</p>
-        <p>• Chapter 4: Form 4B Completion Protocols & Mobile App Sync</p>
+      <a href="${fileUrl}" target="_blank" rel="noopener"
+        class="w-full py-2.5 bg-primary text-white text-xs font-semibold rounded-full hover:bg-primary-container transition-all flex items-center justify-center gap-1.5">
+        <span class="material-symbols-outlined text-base">open_in_new</span>
+        Open Full PDF
+      </a>
+      <div>
+        <p class="text-xs font-bold text-on-surface mb-2">Topics in this document (${topics.length})</p>
+        <div class="flex flex-wrap gap-2 max-h-56 overflow-y-auto pr-1">
+          ${topics.length === 0
+            ? `<p class="text-xs text-on-surface-variant">No indexed topics found for this file yet.</p>`
+            : topics.map(t => `
+              <button onclick="viewManualTopic(${t.id}, '${jsAttr(t.section_header)}')"
+                class="text-left text-xs bg-surface border border-outline-variant/30 hover:border-primary hover:text-primary rounded-full px-3.5 py-2 transition-colors">
+                ${escapeHtml(t.section_header)}
+              </button>
+            `).join("")}
+        </div>
       </div>
-      <button onclick="quickAsk('What are the key instructions in ${filename}?')" class="w-full py-2.5 bg-primary text-white text-xs font-semibold rounded-full hover:bg-primary-container transition-all">
+      <button onclick="closePdfModal(); quickAsk('What are the key instructions in ${jsAttr(docTitle)}?')" class="w-full py-2.5 border border-primary text-primary text-xs font-semibold rounded-full hover:bg-primary-fixed transition-all">
         Ask AI to Summarize this Document
       </button>
     </div>
@@ -993,7 +1139,8 @@ function openPdfModal(filename) {
 }
 
 function closePdfModal() {
-  document.getElementById("modal-pdf").classList.add("hidden");
+  const modal = document.getElementById("modal-pdf");
+  if (modal) modal.classList.add("hidden");
 }
 
 // ==================== 8. NOTIFICATIONS & UPDATES ====================

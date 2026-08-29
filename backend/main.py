@@ -17,7 +17,7 @@ from werkzeug.utils import secure_filename
 from .database import get_db_connection, init_database, DB_PATH
 from .ingestion import (
     run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals,
-    excel_data_type, remove_source_file_data
+    excel_data_type, remove_source_file_data, KNOWN_PDF_TITLES
 )
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query
@@ -538,24 +538,145 @@ def manual_search():
 
 @app.route("/api/manuals/list", methods=["GET"])
 def manual_list():
+    """
+    Dynamically list every PDF actually present in ROOT_DIR, instead of the
+    2 filenames this used to be hardcoded to. This is what lets a freshly
+    uploaded manual show up as a real, clickable card on the Manuals page —
+    the same dynamic-scan fix already applied to ingest_pdf_manuals().
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    manuals = []
+    for fname in sorted(os.listdir(ROOT_DIR)):
+        if not fname.lower().endswith(".pdf"):
+            continue
+        full_path = os.path.join(ROOT_DIR, fname)
+        if not os.path.isfile(full_path):
+            continue
+        stat = os.stat(full_path)
+        size_kb = round(stat.st_size / 1024, 1)
+        size_str = f"{round(size_kb / 1024, 1)} MB" if size_kb >= 1024 else f"{size_kb} KB"
+
+        cursor.execute("""
+            SELECT COUNT(*) AS chunk_count, MAX(page_number) AS max_page, MAX(doc_title) AS doc_title
+            FROM manual_chunks WHERE source_file = ?
+        """, (fname,))
+        row = cursor.fetchone()
+        chunk_count = row["chunk_count"] or 0
+        title = (row["doc_title"] if row and row["doc_title"] else None) \
+            or KNOWN_PDF_TITLES.get(fname) \
+            or os.path.splitext(fname)[0]
+
+        manuals.append({
+            "filename": fname,
+            "title": title,
+            "pages": row["max_page"] or 0,
+            "size": size_str,
+            "chunk_count": chunk_count,
+            "indexed": chunk_count > 0
+        })
+    conn.close()
+    return jsonify({"manuals": manuals})
+
+@app.route("/api/manuals/topics", methods=["GET"])
+def manual_topics():
+    """
+    A browsable, searchable topic list for the Manuals page, alongside the
+    free-text AI search box. Each topic is labeled from the chunk's real
+    section_header when the PDF's text layer actually carried one; when it
+    didn't (some source PDFs — e.g. scanned/print-shop exports — only yield
+    boilerplate per-page text with no real heading), it falls back to a
+    short cleaned snippet of the chunk itself so a topic is still offered
+    rather than silently omitted. Duplicate labels within the same document
+    (e.g. an identical boilerplate line repeated on many pages) collapse to
+    one entry. Supports an optional `q` substring filter and an optional
+    `source_file` filter (used by a single manual's detail modal).
+    """
+    q = request.args.get("q", "").strip().lower()
+    source_file = request.args.get("source_file", "").strip()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    sql = "SELECT id, source_file, doc_title, section_header, page_number, chunk_text FROM manual_chunks"
+    params = []
+    if source_file:
+        sql += " WHERE source_file = ?"
+        params.append(source_file)
+    sql += " ORDER BY source_file, id"
+    cursor.execute(sql, params)
+    rows = cursor.fetchall()
+    conn.close()
+
+    grouped = {}
+    seen_labels = set()
+    for row in rows:
+        header = (row["section_header"] or "").strip()
+        if header:
+            label = header
+        else:
+            snippet = re.sub(r"\s+", " ", (row["chunk_text"] or "")).strip()
+            label = (snippet[:80] + "…") if len(snippet) > 80 else snippet
+        if not label:
+            continue
+
+        # Strip digits before deduping so per-page artifacts that only vary by
+        # a page/signature number (e.g. a print-shop PDF's running header
+        # "...Sig1 SideA", "...Sig2 SideA", ...) collapse into one topic
+        # instead of flooding the list with near-identical entries.
+        dedupe_key = (row["source_file"], re.sub(r"\d+", "", label).strip().lower())
+        if dedupe_key in seen_labels:
+            continue
+        seen_labels.add(dedupe_key)
+
+        if q and q not in label.lower():
+            continue
+
+        key = row["source_file"]
+        grouped.setdefault(key, {
+            "source_file": key,
+            "doc_title": row["doc_title"],
+            "topics": []
+        })
+        grouped[key]["topics"].append({
+            "id": row["id"],
+            "section_header": label,
+            "page_number": row["page_number"]
+        })
+
+    return jsonify({"documents": list(grouped.values())})
+
+@app.route("/api/manuals/chunk", methods=["GET"])
+def manual_chunk_detail():
+    """Fetch one exact indexed chunk by its row id, for a topic clicked from the browsable topic list."""
+    chunk_id = request.args.get("id", "").strip()
+    if not chunk_id.isdigit():
+        return jsonify({"error": "A valid numeric id is required"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM manual_chunks WHERE id = ?", (chunk_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        return jsonify({"error": "Topic not found"}), 404
+
     return jsonify({
-        "manuals": [
-            {
-                "filename": "FAQ (E & S).c58cf9c49a6df89a94b3 (1).pdf",
-                "title": "Census 2027 FAQ for Enumerators and Supervisors",
-                "pages": 9,
-                "size": "191 KB",
-                "category": "Official FAQ"
-            },
-            {
-                "filename": "HLO_Manual_English.pdf",
-                "title": "House Listing Operations (HLO) Instruction Manual",
-                "pages": 136,
-                "size": "97 MB",
-                "category": "Standard Operating Procedure"
-            }
-        ]
+        "source_file": row["source_file"],
+        "doc_title": row["doc_title"],
+        "page_number": row["page_number"],
+        "section_header": row["section_header"],
+        "chunk_text": row["chunk_text"],
     })
+
+@app.route("/api/manuals/file/<path:filename>", methods=["GET"])
+def manual_file(filename):
+    """Serve the actual PDF bytes so 'Open Full PDF' opens the real document."""
+    safe_name = secure_filename(filename)
+    full_path = os.path.join(ROOT_DIR, safe_name)
+    if not safe_name.lower().endswith(".pdf") or not os.path.isfile(full_path):
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(ROOT_DIR, safe_name, mimetype="application/pdf")
 
 # ----------------- Notifications Endpoints -----------------
 @app.route("/api/notifications", methods=["GET"])

@@ -14,43 +14,58 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("LLMProvider")
 logging.basicConfig(level=logging.INFO)
 
-# Exact phrase required when information is not in the uploaded documents.
+# Kept for the local RAG fallback synthesizer only.
 NOT_FOUND_PHRASE = "This information is not available in the uploaded Census documents."
 
 SYSTEM_PROMPTS = {
     "en": (
-        "You are the official AI Census Assistant for Lakhipur Circle, India. "
-        "Your ONLY knowledge source is the context provided below between === CONTEXT DATA === tags. "
-        "STRICT RULES — violations are not allowed under any circumstances:\n"
-        "1. NEVER answer from your own training knowledge. If the answer is not explicitly stated in the CONTEXT DATA, "
-        f"you MUST respond with exactly: '{NOT_FOUND_PHRASE}'\n"
-        "2. Do not guess, infer, or extrapolate beyond what the context states.\n"
-        "3. If CONTEXT DATA contains OFFICIAL CENSUS RECORDS, always prioritize and present those facts first.\n"
-        "4. Always cite your source at the bottom (e.g. 'Source: Census Record DB - 2024' or 'Source: HLO Manual, Page X').\n"
-        "5. When technical assistance is needed, remind the user to contact one of the two Technical Assistants: "
-        "Shahin Sha A. (+91 84534 41975) or S. A. Ahmed (+91 69019 80926) on WhatsApp. "
-        "Neither of them is a supervisor — real supervisor names come only from the Census Records context provided to you.\n"
-        "6. Keep responses professional, structured, and easy to read.\n"
-        "7. IMPORTANT: If the CONTEXT DATA section is empty or contains no relevant information for the question asked, "
-        f"respond with exactly: '{NOT_FOUND_PHRASE}'"
+        "You are the official AI Census Assistant for Lakhipur Circle, India, supporting "
+        "Census 2027 field functionaries (Enumerators and Supervisors).\n\n"
+        "You have TWO knowledge sources:\n"
+        "1. OFFICIAL CONTEXT DATA — Lakhipur Circle records (Excel: HLB allocations, functionary details) "
+        "and official manuals/FAQ (PDF: HLO Manual, FAQ). When this context is provided and relevant, "
+        "ALWAYS prefer it and cite the source (e.g. 'Source: HLO Manual, Page X' or 'Source: Census Record DB').\n"
+        "2. GENERAL KNOWLEDGE — Your training knowledge about Census 2027, census procedures, "
+        "enumeration, houselisting, HLB concepts, field procedures, and general census terminology. "
+        "Use this when the official context does not contain the answer.\n\n"
+        "RULES:\n"
+        "• If OFFICIAL CONTEXT DATA is provided and answers the question — use it first and cite the source.\n"
+        "• If the context does not contain the answer but you have reliable general knowledge about census "
+        "procedures — answer from that knowledge. Clearly note: 'Based on general Census guidelines' "
+        "rather than claiming it is from the specific Lakhipur documents.\n"
+        "• If the question is about something you genuinely do not know — say so honestly. "
+        "Do NOT fabricate facts, names, or numbers.\n"
+        "• If the question is completely unrelated to census, enumeration, or this app — politely "
+        "redirect the user to census topics.\n"
+        "• When technical assistance is needed, remind the user to contact: "
+        "Shahin Sha A. (+91 84534 41975) or S. A. Ahmed (+91 69019 80926) on WhatsApp.\n"
+        "• Keep responses professional, structured, and easy to read. Use bullet points or numbered "
+        "lists for multi-step procedures."
     ),
     "as": (
-        "আপুনি লাক্ষীপুৰ চাৰ্কেলৰ চৰকাৰী এআই লোকপিয়ল সহায়ক (AI Census Assistant)। "
-        "যোগান ধৰা লোকপিয়ল তথ্য (Excel) আৰু চৰকাৰী নিৰ্দেশনা/মেনুৱেল (PDF) ৰ ওপৰত ভিত্তি কৰি সঠিক উত্তৰ দিয়ক। "
-        "প্ৰসংগত নথকা তথ্য দিব নালাগে। "
-        "অনুগ্ৰহ কৰি অসমীয়াত উত্তৰ দিয়ক আৰু তথ্যৰ উৎস উল্লেখ কৰক।"
+        "আপুনি লাক্ষীপুৰ চাৰ্কেলৰ চৰকাৰী এআই লোকপিয়ল সহায়ক (AI Census Assistant), "
+        "Census 2027-ৰ বাবে সহায় আগবঢ়ায়।\n"
+        "যদি প্ৰসংগ তথ্যত (Excel/PDF) সঠিক উত্তৰ আছে, সেইটো আগতে উল্লেখ কৰক আৰু উৎস দিয়ক।\n"
+        "যদি প্ৰসংগত উত্তৰ নাই, কিন্তু লোকপিয়ল পদ্ধতি সম্পৰ্কে সাধাৰণ জ্ঞান আছে, সেই ভিত্তিত উত্তৰ দিয়ক।\n"
+        "নিৰ্ভুল তথ্য দিয়ক; মনগড়া তথ্য নিদিব।\n"
+        "অনুগ্ৰহ কৰি অসমীয়াত উত্তৰ দিয়ক।"
     ),
     "hi": (
-        "आप लखीपुर सर्कल के आधिकारिक एआई जनगणना सहायक (AI Census Assistant) हैं। "
-        "प्रदान किए गए जनगणना रिकॉर्ड (Excel) और आधिकारिक नियमावली (PDF) के आधार पर सटीक और संक्षिप्त उत्तर दें। "
-        "संदर्भ में उपलब्ध जानकारी के बाहर कभी उत्तर न दें। "
-        "कृपया स्पष्ट हिंदी में उत्तर दें और जानकारी के स्रोत का उल्लेख करें।"
+        "आप लखीपुर सर्कल के आधिकारिक एआई जनगणना सहायक (AI Census Assistant) हैं, "
+        "जो Census 2027 के क्षेत्रीय कर्मचारियों की सहायता करते हैं।\n"
+        "यदि प्रदान किए गए संदर्भ (Excel/PDF) में सटीक उत्तर है, तो उसे प्राथमिकता दें और स्रोत बताएं।\n"
+        "यदि संदर्भ में उत्तर नहीं है लेकिन आपके पास जनगणना प्रक्रियाओं के बारे में सामान्य ज्ञान है, "
+        "तो उसके आधार पर उत्तर दें।\n"
+        "सटीक जानकारी दें; अनुमान से जानकारी न बनाएं।\n"
+        "कृपया स्पष्ट हिंदी में उत्तर दें।"
     ),
     "bn": (
-        "আপনি লাখিপুর সার্কেলের অফিসিয়াল এআই আদমশুমারি সহকারী (AI Census Assistant)। "
-        "প্রদত্ত আদমশুমারি রেকর্ড (Excel) এবং নির্দেশিকা ম্যানুয়াল (PDF) এর উপর ভিত্তি করে সঠিক উত্তর প্রদান করুন। "
-        "প্রসঙ্গের বাইরে কোনো তথ্য দেবেন না। "
-        "অনুগ্রহ করে স্পষ্ট বাংলায় উত্তর দিন এবং তথ্যের উৎস উল্লেখ করুন।"
+        "আপনি লাখিপুর সার্কেলের অফিসিয়াল এআই আদমশুমারি সহকারী (AI Census Assistant), "
+        "যিনি Census 2027 মাঠ কর্মীদের সহায়তা করেন।\n"
+        "প্রদত্ত প্রেক্ষাপট (Excel/PDF) এ সঠিক উত্তর থাকলে, সেটি প্রথমে উল্লেখ করুন এবং উৎস দিন।\n"
+        "প্রেক্ষাপটে উত্তর না থাকলে কিন্তু জনশুমারি পদ্ধতি সম্পর্কে সাধারণ জ্ঞান থাকলে, সেই ভিত্তিতে উত্তর দিন।\n"
+        "নির্ভুল তথ্য দিন; অনুমানে তথ্য বানাবেন না।\n"
+        "অনুগ্রহ করে স্পষ্ট বাংলায় উত্তর দিন।"
     )
 }
 
@@ -261,66 +276,73 @@ def generate_local_rag_response(query: str, context: Dict[str, Any], lang: str =
     return NOT_FOUND_PHRASE
 
 def call_gemini_api(api_key: str, model: str, query: str, context: Dict[str, Any], lang: str = "en") -> Optional[str]:
-    """Call Google Gemini 2.5 Flash / Pro API using REST."""
+    """Call Google Gemini API using REST (supports Gemini 2.5 Flash/Pro and similar)."""
     system_inst = SYSTEM_PROMPTS.get(lang, SYSTEM_PROMPTS["en"])
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
 
-    context_text = context.get("context_text", "")
+    context_text = context.get("context_text", "").strip()
 
-    # If there is absolutely no context to ground the answer, skip the API call
-    # and return the exact not-found phrase — this prevents hallucination when
-    # neither records nor manual chunks matched the query.
-    if not context_text.strip():
-        logger.info("No context retrieved — skipping Gemini API call to prevent hallucination.")
-        return NOT_FOUND_PHRASE
-
-    prompt = (
-        f"{system_inst}\n\n"
-        f"=== CONTEXT DATA (your ONLY knowledge source) ===\n"
-        f"{context_text}\n\n"
-        f"=== CONTACT INFO ===\n"
-        f"{context.get('contact_info', '')}\n\n"
-        f"=== USER QUESTION ===\n"
-        f"{query}\n\n"
-        f"CRITICAL REMINDER: Answer ONLY using the CONTEXT DATA above. "
-        f"If the answer is not in the context, respond with exactly: '{NOT_FOUND_PHRASE}'"
-    )
+    # Build the prompt. When official context is available it is included so
+    # Gemini prioritises it; when it is empty Gemini falls back to its general
+    # census training knowledge instead of returning a hard refusal.
+    if context_text:
+        prompt = (
+            f"{system_inst}\n\n"
+            f"=== OFFICIAL CONTEXT DATA (Lakhipur Circle Records & Manuals) ===\n"
+            f"{context_text}\n\n"
+            f"=== CONTACT INFO ===\n"
+            f"{context.get('contact_info', '')}\n\n"
+            f"=== USER QUESTION ===\n"
+            f"{query}\n\n"
+            f"Answer using the OFFICIAL CONTEXT DATA above when it is relevant. "
+            f"If the context does not cover this question, answer from your general "
+            f"census knowledge and note that it is based on general guidelines."
+        )
+    else:
+        # No RAG context found — let Gemini answer from general census knowledge.
+        # This is intentional: many valid questions (e.g. 'What is Census 2027?',
+        # 'Explain enumeration') are not in the local PDFs but Gemini knows them.
+        logger.info("No local context retrieved — calling Gemini with general census knowledge.")
+        prompt = (
+            f"{system_inst}\n\n"
+            f"=== CONTACT INFO ===\n"
+            f"{context.get('contact_info', '')}\n\n"
+            f"=== USER QUESTION ===\n"
+            f"{query}\n\n"
+            f"No specific Lakhipur Circle records matched this query. "
+            f"Answer from your general knowledge about Census 2027, census procedures, "
+            f"enumeration, houselisting, and related topics. "
+            f"If this is not a census-related question, politely redirect the user."
+        )
 
     payload = {
         "contents": [{
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "temperature": 0.0,   # Zero temperature: deterministic, no hallucination
+            "temperature": 0.2,   # Slight temperature for natural language; still conservative
             "maxOutputTokens": 1024
         }
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=20)
+        resp = requests.post(url, json=payload, timeout=25)
         if resp.status_code == 200:
             data = resp.json()
             candidates = data.get("candidates", [])
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
                 if parts:
-                    answer = parts[0].get("text", "")
-                    # Post-call validation: if the answer doesn't reference any
-                    # context marker, it may be a hallucinated response. Fall
-                    # back to the local synthesizer which is grounded by design.
-                    context_markers = ["Source:", "HLB", "Enumerator", "Supervisor", "Census", "Manual", "Page", "Record"]
-                    has_context_reference = any(m.lower() in answer.lower() for m in context_markers)
-                    if answer and not has_context_reference and len(answer) > 100:
-                        logger.warning("Gemini response appears ungrounded — falling back to local RAG synthesizer.")
-                        return None  # Trigger local fallback
-                    return answer
+                    answer = parts[0].get("text", "").strip()
+                    if answer:
+                        return answer
         else:
             logger.warning(f"Gemini API returned status {resp.status_code}: {resp.text}")
     except Exception as e:
         logger.error(f"Gemini API request failed: {e}")
     return None
 
-def answer_query(query: str, model_name: str = "gemini-3.6-flash", lang: str = "en") -> Dict[str, Any]:
+def answer_query(query: str, model_name: str = "gemini-2.5-flash", lang: str = "en") -> Dict[str, Any]:
     """Top-level generation function that coordinates RAG retrieval and LLM call or local fallback."""
     from .rag_engine import retrieve_rag_context
     import time

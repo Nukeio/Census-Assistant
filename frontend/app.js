@@ -385,6 +385,9 @@ function navigateTo(viewName, updateHash = true) {
     loadAdminUsers();
     loadAdminQueryLogs();
     loadAdminAttendance();
+    loadAiStatus();
+    loadAdminAccounts();
+    loadAuthAudit();
   } else if (viewName === "attendance") {
     initAttendanceView();
   } else if (viewName === "notifications") {
@@ -415,26 +418,202 @@ function applyRoleBasedNav() {
 }
 
 // ==================== 4. AUTHENTICATION HANDLERS ====================
+/**
+ * Login tab switcher. "register" is a sub-view of the password tab rather
+ * than a tab of its own, so the three-tab header stays as designed.
+ */
 function switchLoginTab(tab) {
-  const formOtp = document.getElementById("form-otp");
-  const formAdmin = document.getElementById("form-admin");
-  const btnOtp = document.getElementById("tab-btn-otp");
-  const btnAdmin = document.getElementById("tab-btn-admin");
+  const forms = {
+    otp: "form-otp",
+    password: "form-password",
+    register: "form-register",
+    admin: "form-admin"
+  };
+  Object.values(forms).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add("hidden");
+  });
+  const active = document.getElementById(forms[tab] || forms.otp);
+  if (active) active.classList.remove("hidden");
 
-  if (tab === "otp") {
-    formOtp.classList.remove("hidden");
-    formAdmin.classList.add("hidden");
-    btnOtp.classList.add("border-primary", "text-primary");
-    btnOtp.classList.remove("border-transparent", "text-on-surface-variant");
-    btnAdmin.classList.remove("border-primary", "text-primary");
-    btnAdmin.classList.add("border-transparent", "text-on-surface-variant");
-  } else {
-    formOtp.classList.add("hidden");
-    formAdmin.classList.remove("hidden");
-    btnAdmin.classList.add("border-primary", "text-primary");
-    btnAdmin.classList.remove("border-transparent", "text-on-surface-variant");
-    btnOtp.classList.remove("border-primary", "text-primary");
-    btnOtp.classList.add("border-transparent", "text-on-surface-variant");
+  // "register" keeps the Password tab highlighted.
+  const highlighted = tab === "register" ? "password" : (forms[tab] ? tab : "otp");
+  ["otp", "password", "admin"].forEach(name => {
+    const btn = document.getElementById(`tab-btn-${name}`);
+    if (!btn) return;
+    if (name === highlighted) {
+      btn.classList.add("border-primary", "text-primary");
+      btn.classList.remove("border-transparent", "text-on-surface-variant");
+    } else {
+      btn.classList.remove("border-primary", "text-primary");
+      btn.classList.add("border-transparent", "text-on-surface-variant");
+    }
+  });
+}
+
+function showRegisterForm() {
+  switchLoginTab("register");
+}
+
+/**
+ * Shared post-sign-in handling for every credential path (OTP, password,
+ * admin). Stores the session, then either forces a password change or lands
+ * the user in the app.
+ */
+function completeSignIn(data, landingView = "home", greeting = "") {
+  state.authToken = data.token;
+  state.currentUser = data.user;
+  localStorage.setItem("census_token", data.token);
+  localStorage.setItem("census_user", JSON.stringify(data.user));
+
+  showAppShell();
+  updateUserHeader();
+  applyRoleBasedNav();
+
+  if (data.must_change_password) {
+    // The session is running on an admin-issued temporary password and the
+    // backend refuses admin work until it is replaced, so ask immediately.
+    openChangePasswordModal({ forced: true });
+    return;
+  }
+
+  navigateTo(landingView);
+  refreshHomeAttendanceStatus();
+  if (greeting) showToast(greeting);
+}
+
+async function handleUserLogin(e) {
+  e.preventDefault();
+  const identifier = document.getElementById("user-identifier").value.trim();
+  const password = document.getElementById("user-password").value;
+
+  try {
+    const res = await apiFetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifier, password })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById("user-password").value = "";
+      completeSignIn(data, "home", `Welcome back, ${data.user.name}.`);
+    } else {
+      showToast(data.message || "Sign-in failed.");
+    }
+  } catch (err) {
+    showToast("Sign-in request failed. Check your connection.");
+  }
+}
+
+async function handleRegister(e) {
+  e.preventDefault();
+  const name = document.getElementById("reg-name").value.trim();
+  const mobile = document.getElementById("reg-mobile").value.replace(/\D/g, "");
+  const password = document.getElementById("reg-password").value;
+
+  if (mobile.length !== 10) return showToast("Enter a valid 10-digit mobile number.");
+
+  try {
+    const res = await apiFetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, mobile_number: mobile, password })
+    });
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById("reg-password").value = "";
+      completeSignIn(data, "home", "Account created. Welcome!");
+    } else {
+      showToast(data.message || "Could not create the account.");
+    }
+  } catch (err) {
+    showToast("Registration request failed.");
+  }
+}
+
+async function handleForgotPassword() {
+  const identifier = (document.getElementById("user-identifier").value || "").trim();
+  if (!identifier) {
+    return showToast("Enter your mobile number first, then tap Forgot password.");
+  }
+  try {
+    const res = await apiFetch("/api/auth/forgot-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifier })
+    });
+    const data = await res.json();
+    showToast(data.message || "Request submitted.");
+  } catch (err) {
+    showToast("Could not submit the request.");
+  }
+}
+
+// ---- Password change (forced after a temporary password, or voluntary) ----
+
+function openChangePasswordModal(options = {}) {
+  const { forced = false } = options;
+  const modal = document.getElementById("modal-change-password");
+  if (!modal) return;
+
+  document.getElementById("change-password-title").textContent =
+    forced ? "Set a new password" : "Change your password";
+  document.getElementById("change-password-sub").textContent = forced
+    ? "You signed in with a temporary password. Choose your own to continue."
+    : "Enter your current password, then choose a new one.";
+
+  // A forced change has no way out: the backend blocks admin work until the
+  // temporary password is replaced, so offering Cancel would just dead-end.
+  const cancel = document.getElementById("cp-cancel");
+  if (cancel) cancel.classList.toggle("hidden", forced);
+
+  ["cp-current", "cp-new", "cp-confirm"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  modal.dataset.forced = forced ? "1" : "";
+  modal.classList.remove("hidden");
+}
+
+function closeChangePasswordModal() {
+  const modal = document.getElementById("modal-change-password");
+  if (modal && modal.dataset.forced !== "1") modal.classList.add("hidden");
+}
+
+async function handleChangePassword(e) {
+  e.preventDefault();
+  const current = document.getElementById("cp-current").value;
+  const next = document.getElementById("cp-new").value;
+  const confirm = document.getElementById("cp-confirm").value;
+
+  if (next !== confirm) return showToast("The two new passwords do not match.");
+  if (next.length < 8) return showToast("Password must be at least 8 characters long.");
+
+  try {
+    const res = await apiFetch("/api/auth/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current_password: current, new_password: next })
+    });
+    const data = await res.json();
+    if (!data.success) return showToast(data.message || "Could not update the password.");
+
+    if (data.token) {
+      state.authToken = data.token;
+      localStorage.setItem("census_token", data.token);
+    }
+    if (state.currentUser) {
+      state.currentUser.must_change_password = false;
+      localStorage.setItem("census_user", JSON.stringify(state.currentUser));
+    }
+    const modal = document.getElementById("modal-change-password");
+    modal.dataset.forced = "";
+    modal.classList.add("hidden");
+
+    showToast("Password updated.");
+    navigateTo(state.currentUser && state.currentUser.role === "admin" ? "admin" : "home");
+  } catch (err) {
+    showToast("Could not update the password.");
   }
 }
 
@@ -515,15 +694,8 @@ async function handleAdminLogin(e) {
     });
     const data = await res.json();
     if (data.success) {
-      state.authToken = data.token;
-      state.currentUser = data.user;
-      localStorage.setItem("census_token", data.token);
-      localStorage.setItem("census_user", JSON.stringify(data.user));
-      showAppShell();
-      updateUserHeader();
-      applyRoleBasedNav();
-      navigateTo("admin");
-      showToast("Signed in as Administrator.");
+      document.getElementById("admin-pass").value = "";
+      completeSignIn(data, "admin", "Signed in as Administrator.");
     } else {
       showToast(data.message || "Invalid admin credentials.");
     }
@@ -610,7 +782,8 @@ async function handleSendChat(e) {
     });
     const data = await res.json();
     removeChatSkeleton(thinkingId);
-    appendChatMessage("ai", data.answer, data.citations, data.intent);
+    appendChatMessage("ai", data.answer, data.citations, data.intent,
+                      data.web_searched, data.searches_remaining_today, data.answered_by);
   } catch (err) {
     removeChatSkeleton(thinkingId);
     appendChatMessage("ai", "I encountered a connection error. Please check your network or try again.", []);
@@ -634,7 +807,8 @@ function executeHomeSearch() {
   }
 }
 
-function appendChatMessage(sender, text, citations = [], intent = "") {
+function appendChatMessage(sender, text, citations = [], intent = "", webSearched = false,
+                           searchesRemaining = null, answeredBy = "") {
   const container = document.getElementById("chat-messages");
   if (!container) return;
 
@@ -650,12 +824,33 @@ function appendChatMessage(sender, text, citations = [], intent = "") {
     `;
   } else {
     msgDiv.className += " items-start";
-    const citationHtml = citations && citations.length > 0 
-      ? `<div class="flex items-center gap-1 text-[11px] text-outline mt-2.5">
-           <span class="material-symbols-outlined text-[13px]">database</span>
-           <span>Source: ${escapeHtml(citations.join(" | "))}</span>
-         </div>`
-      : "";
+    
+    let footerHtml = "";
+    // Offline mode is stated plainly rather than left to look like a normal
+    // answer — a user is entitled to know the assistant could not consult the
+    // AI service for this one.
+    if (answeredBy === "offline_fallback") {
+      footerHtml += `
+        <div class="flex items-center gap-1.5 text-[11px] text-[#8a6100] mt-2 font-medium">
+          <span class="material-symbols-outlined text-[14px]">cloud_off</span>
+          <span>Offline mode — answered from local records only</span>
+        </div>`;
+    }
+    if (webSearched) {
+      const quotaText = searchesRemaining != null ? ` • ${searchesRemaining}/10 searches left today` : "";
+      footerHtml += `
+        <div class="flex items-center gap-1.5 text-[11px] text-tertiary-container mt-2 font-medium">
+          <span class="material-symbols-outlined text-[14px]">public</span>
+          <span>Web Search Grounded${escapeHtml(quotaText)}</span>
+        </div>`;
+    }
+    if (citations && citations.length > 0) {
+      footerHtml += `
+        <div class="flex items-center gap-1 text-[11px] text-outline mt-1.5">
+          <span class="material-symbols-outlined text-[13px]">database</span>
+          <span>Source: ${escapeHtml(citations.join(" | "))}</span>
+        </div>`;
+    }
 
     msgDiv.innerHTML = `
       <div class="flex items-start gap-3 max-w-[95%] md:max-w-[80%]">
@@ -665,7 +860,7 @@ function appendChatMessage(sender, text, citations = [], intent = "") {
         <div class="flex flex-col gap-1 flex-1">
           <div class="bg-surface-container-lowest text-on-surface rounded-2xl rounded-tl-sm p-4 shadow-sm border border-outline-variant/30 text-sm leading-relaxed">
             ${formatMarkdown(text)}
-            ${citationHtml}
+            ${footerHtml}
           </div>
           <!-- Action Buttons -->
           <div class="flex items-center gap-2 px-2 text-on-surface-variant">
@@ -1825,6 +2020,207 @@ async function loadAdminQueryLogs() {
     });
   } catch (err) {
     container.innerHTML = `<p class="text-xs text-error p-3">Failed to load query logs.</p>`;
+  }
+}
+
+// ==================== 9a. ADMIN: AI STATUS & ACCOUNT SUPPORT ====================
+
+/**
+ * Show whether the assistant can reach a language model. This is the panel
+ * that makes the single most common failure visible: with no GEMINI_API_KEY
+ * set on the server, every question silently falls back to records-and-
+ * manuals-only answers, which looks like the AI is restricted to the PDFs.
+ */
+async function loadAiStatus(probe = false) {
+  const box = document.getElementById("admin-ai-status");
+  if (!box) return;
+  box.innerHTML = `<div class="flex justify-center p-2"><div class="loader-spinner-primary"></div></div>`;
+
+  try {
+    const res = await apiFetch(`/api/admin/ai-status${probe ? "?probe=1" : ""}`);
+    const data = await res.json();
+    if (!data.success) {
+      box.innerHTML = `<p class="text-xs text-error">${escapeHtml(data.error || "Could not read AI status.")}</p>`;
+      return;
+    }
+
+    const ai = data.ai;
+    const healthy = ai.mode === "llm";
+    const tone = healthy
+      ? { chip: "bg-[#2e7d32]/10 text-[#2e7d32]", icon: "check_circle", iconClass: "text-[#2e7d32]", label: "Full AI answers" }
+      : { chip: "bg-error/10 text-error", icon: "error", iconClass: "text-error", label: "Records & manuals only" };
+
+    const rows = [
+      ["Provider", ai.provider],
+      ["Model", ai.model],
+      ["API key configured", ai.configured ? "Yes" : "No"],
+      ["Daily web-search limit", `${ai.daily_web_search_limit} per user`],
+    ];
+    if (ai.reachable !== undefined) rows.push(["Reachable from server", ai.reachable ? "Yes" : "No"]);
+    if (ai.http_status) rows.push(["Last HTTP status", ai.http_status]);
+    if (ai.last_error) rows.push(["Last error", `${ai.last_error_kind || ""} — ${ai.last_error}`]);
+    if (ai.last_error_at) rows.push(["Last error at", ai.last_error_at]);
+
+    box.innerHTML = `
+      <div class="flex items-start gap-3 mb-3">
+        <span class="material-symbols-outlined ${tone.iconClass} mt-0.5">${tone.icon}</span>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${tone.chip}">${tone.label}</span>
+          </div>
+          <p class="text-xs text-on-surface-variant mt-1.5 leading-relaxed">${escapeHtml(ai.summary || "")}</p>
+        </div>
+      </div>
+      <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+        ${rows.map(([k, v]) => `
+          <div class="flex justify-between gap-3 border-b border-outline-variant/20 py-1">
+            <dt class="text-on-surface-variant shrink-0">${escapeHtml(k)}</dt>
+            <dd class="text-on-surface font-medium text-right break-all">${escapeHtml(String(v))}</dd>
+          </div>`).join("")}
+      </dl>
+      ${healthy ? "" : `
+        <div class="mt-3 p-3 rounded-lg bg-surface-container text-[11px] text-on-surface-variant leading-relaxed">
+          <strong class="text-on-surface">To enable full AI answers:</strong> set <code class="font-mono">GEMINI_API_KEY</code>
+          in the PythonAnywhere web app's environment variables, then reload the web app. A free key can be
+          created at Google AI Studio. On a free PythonAnywhere account, outbound access is allowlist-only —
+          if the key is set but still unreachable, set
+          <code class="font-mono">OUTBOUND_HTTP_PROXY=http://proxy.server:3128</code> as well.
+        </div>`}
+    `;
+  } catch (err) {
+    box.innerHTML = `<p class="text-xs text-error">Could not read AI status.</p>`;
+  }
+}
+
+async function handleAdminResetPassword() {
+  const identifier = (document.getElementById("support-identifier").value || "").trim();
+  const box = document.getElementById("support-result");
+  if (!identifier) return showToast("Enter the user's mobile number or username.");
+
+  try {
+    const res = await apiFetch("/api/admin/users/reset-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifier })
+    });
+    const data = await res.json();
+
+    if (!data.success) {
+      box.className = "rounded-xl border border-error/40 bg-error/5 p-4";
+      box.innerHTML = `<p class="text-sm text-error font-medium">${escapeHtml(data.message || "Could not issue a password.")}</p>`;
+      box.classList.remove("hidden");
+      return;
+    }
+
+    box.className = "rounded-xl border border-[#2e7d32]/40 bg-[#2e7d32]/5 p-4";
+    box.innerHTML = `
+      <p class="text-sm font-bold text-on-surface">${escapeHtml(data.name)}</p>
+      <p class="text-xs text-on-surface-variant mb-2">${escapeHtml(data.account)}</p>
+      <p class="text-xs text-on-surface-variant mb-1">Read this out to the user:</p>
+      <div class="flex items-center gap-2">
+        <code class="flex-1 px-3 py-2 rounded-lg bg-surface border border-outline-variant font-mono text-base font-bold tracking-widest text-on-surface">${escapeHtml(data.temporary_password)}</code>
+        <button onclick="copyTemporaryPassword('${escapeAttr(data.temporary_password)}')"
+          class="shrink-0 px-3 py-2 text-xs font-semibold text-primary rounded-full border border-primary/40 hover:bg-primary-fixed/40 transition-colors">Copy</button>
+      </div>
+      <p class="text-[11px] text-on-surface-variant mt-2 leading-relaxed">${escapeHtml(data.note)}
+      This is shown once and is not stored anywhere in readable form.</p>`;
+    box.classList.remove("hidden");
+    loadAdminAccounts();
+    loadAuthAudit();
+  } catch (err) {
+    showToast("Could not issue a temporary password.");
+  }
+}
+
+function copyTemporaryPassword(value) {
+  navigator.clipboard.writeText(value).then(
+    () => showToast("Temporary password copied."),
+    () => showToast("Could not copy — please read it from the screen.")
+  );
+}
+
+async function handleAdminUnlock() {
+  const identifier = (document.getElementById("support-identifier").value || "").trim();
+  if (!identifier) return showToast("Enter the user's mobile number or username.");
+  try {
+    const res = await apiFetch("/api/admin/users/unlock", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifier })
+    });
+    const data = await res.json();
+    showToast(data.message || (data.success ? "Account unlocked." : "Could not unlock."));
+    if (data.success) loadAdminAccounts();
+  } catch (err) {
+    showToast("Could not unlock the account.");
+  }
+}
+
+async function loadAdminAccounts() {
+  const tbody = document.getElementById("admin-accounts-body");
+  if (!tbody) return;
+  try {
+    const res = await apiFetch("/api/admin/accounts");
+    const data = await res.json();
+    if (!data.success) {
+      tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-error">Could not load accounts.</td></tr>`;
+      return;
+    }
+    if (!data.accounts.length) {
+      tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-on-surface-variant">No password accounts registered yet.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = "";
+    data.accounts.forEach(a => {
+      let stateChip = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#2e7d32]/10 text-[#2e7d32]">Active</span>`;
+      if (a.locked) {
+        stateChip = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-error/10 text-error">Locked</span>`;
+      } else if (a.must_change_password) {
+        stateChip = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#8a6100]/10 text-[#8a6100]">Temp password</span>`;
+      } else if (String(a.status).toUpperCase() !== "ACTIVE") {
+        stateChip = `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-error/10 text-error">Disabled</span>`;
+      }
+
+      const tr = document.createElement("tr");
+      tr.className = "hover:bg-surface-container-low transition-colors cursor-pointer";
+      tr.onclick = () => { document.getElementById("support-identifier").value = a.mobile_number || a.user_id; };
+      tr.innerHTML = `
+        <td class="p-3 font-bold text-on-surface">${escapeHtml(a.name)}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(a.mobile_number || "—")}</td>
+        <td class="p-3 text-on-surface-variant">${escapeHtml(a.functionary_type || a.role)}</td>
+        <td class="p-3 text-on-surface-variant text-[11px]">${escapeHtml((a.created_at || "").slice(0, 16))}</td>
+        <td class="p-3 text-on-surface-variant text-[11px]">${escapeHtml((a.last_login_at || "Never").slice(0, 16))}</td>
+        <td class="p-3">${stateChip}${a.failed_attempts ? `<span class="ml-1 text-[10px] text-on-surface-variant">${a.failed_attempts} failed</span>` : ""}</td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="6" class="p-4 text-center text-error">Could not load accounts.</td></tr>`;
+  }
+}
+
+async function loadAuthAudit() {
+  const box = document.getElementById("admin-auth-audit");
+  if (!box) return;
+  try {
+    const res = await apiFetch("/api/admin/auth-audit?limit=40");
+    const data = await res.json();
+    if (!data.success || !data.events.length) {
+      box.innerHTML = `<p class="text-xs text-on-surface-variant p-2 text-center">No sign-in activity recorded yet.</p>`;
+      return;
+    }
+    const toneFor = outcome =>
+      outcome === "success" ? "text-[#2e7d32]" : outcome === "locked" ? "text-error" : "text-[#8a6100]";
+
+    box.innerHTML = data.events.map(e => `
+      <div class="flex items-center gap-2 text-[11px] p-2 rounded-lg border border-outline-variant/30 bg-surface">
+        <span class="font-semibold ${toneFor(e.outcome)} shrink-0">${escapeHtml(e.outcome || "")}</span>
+        <span class="font-medium text-on-surface shrink-0">${escapeHtml(e.event)}</span>
+        <span class="text-on-surface-variant truncate">${escapeHtml(e.account || "")}${e.detail ? " • " + escapeHtml(e.detail) : ""}</span>
+        <span class="ml-auto text-on-surface-variant shrink-0">${escapeHtml((e.created_at || "").slice(0, 16))}</span>
+      </div>`).join("");
+  } catch (err) {
+    box.innerHTML = `<p class="text-xs text-error p-2">Could not load sign-in activity.</p>`;
   }
 }
 

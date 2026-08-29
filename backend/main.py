@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import json
+import time
 import logging
 from datetime import datetime
 from urllib.parse import quote as requests_quote
@@ -20,8 +21,13 @@ from .ingestion import (
     excel_data_type, remove_source_file_data, KNOWN_PDF_TITLES
 )
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
-from .llm_provider import answer_query
-from .auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
+from .llm_provider import answer_query, get_user_search_usage, get_ai_status, DAILY_WEB_SEARCH_LIMIT
+from .auth import (
+    create_guest_session, request_otp, verify_otp, admin_login,
+    register_user, login_user, request_password_reset, complete_password_reset,
+    change_password, admin_reset_user_password, admin_unlock_account,
+    generate_jwt_token, verify_jwt_token
+)
 from . import attendance
 from .messaging_gateway import (
     handle_whatsapp_webhook, handle_telegram_webhook, get_channel_status,
@@ -88,6 +94,15 @@ def _require_admin():
     user = _authenticated_user()
     if not user or user.get("role") != "admin":
         return jsonify({"success": False, "error": "Admin authentication required."}), 403
+    # A session running on an admin-issued temporary password can do exactly
+    # one thing: set a real password. Otherwise a temporary credential read
+    # aloud at the office counter would carry full administrative rights.
+    if user.get("must_change_password"):
+        return jsonify({
+            "success": False,
+            "must_change_password": True,
+            "error": "Set a new password before using the admin console.",
+        }), 403
     return None
 
 def _is_admin_request():
@@ -142,12 +157,100 @@ def auth_verify_otp():
     otp = data.get("otp", "")
     return jsonify(verify_otp(mobile, otp))
 
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    data = request.get_json() or {}
+    name = data.get("name", "")
+    mobile = data.get("mobile_number", "")
+    password = data.get("password", "")
+    email = data.get("email", None)
+    return jsonify(register_user(name, mobile, password, email=email))
+
+def _client_ip() -> str:
+    """Caller's IP, honouring the proxy header PythonAnywhere sets."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or ""
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    data = request.get_json() or {}
+    identifier = data.get("identifier") or data.get("username") or data.get("mobile_number", "")
+    password = data.get("password", "")
+    result = login_user(identifier, password, ip_address=_client_ip())
+    return jsonify(result), (200 if result.get("success") else 401)
+
 @app.route("/api/auth/admin-login", methods=["POST"])
 def auth_admin_login():
     data = request.get_json() or {}
     username = data.get("username", "")
     password = data.get("password", "")
-    return jsonify(admin_login(username, password))
+    result = admin_login(username, password, ip_address=_client_ip())
+    return jsonify(result), (200 if result.get("success") else 401)
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+def auth_forgot_password():
+    data = request.get_json() or {}
+    identifier = data.get("identifier") or data.get("mobile_number") or data.get("email", "")
+    return jsonify(request_password_reset(identifier, ip_address=_client_ip()))
+
+@app.route("/api/auth/reset-password", methods=["POST"])
+def auth_reset_password():
+    data = request.get_json() or {}
+    identifier = data.get("identifier") or data.get("mobile_number") or data.get("email", "")
+    reset_code = data.get("reset_code") or data.get("otp", "")
+    new_password = data.get("new_password") or data.get("password", "")
+    return jsonify(complete_password_reset(identifier, reset_code, new_password, ip_address=_client_ip()))
+
+@app.route("/api/auth/change-password", methods=["POST"])
+def auth_change_password():
+    """
+    Change your own password from inside a signed-in session. This is where a
+    user lands after signing in with an admin-issued temporary password —
+    succeeding here is what clears must_change_password.
+    """
+    user = _authenticated_user()
+    if not user:
+        return jsonify({"success": False, "message": "Please sign in first."}), 401
+
+    data = request.get_json() or {}
+    identifier = (
+        user.get("mobile") or user.get("username") or user.get("sub") or ""
+    )
+    result = change_password(
+        identifier,
+        data.get("current_password", ""),
+        data.get("new_password", ""),
+        ip_address=_client_ip(),
+    )
+    if result.get("success"):
+        # Re-issue the token so the cleared must_change_password flag takes
+        # effect immediately instead of at the next sign-in.
+        refreshed = dict(user)
+        refreshed["must_change_password"] = False
+        result["token"] = generate_jwt_token({
+            "user_id": user.get("sub"),
+            "name": user.get("name"),
+            "role": user.get("role"),
+            "mobile_number": user.get("mobile", ""),
+            "email": user.get("email", ""),
+            "functionary_type": user.get("functionary_type", "User"),
+            "must_change_password": False,
+        })
+    return jsonify(result), (200 if result.get("success") else 400)
+
+@app.route("/api/auth/quota", methods=["GET"])
+def auth_quota():
+    user = _authenticated_user()
+    user_id = user.get("sub") if user else f"guest_{request.remote_addr}"
+    used, remaining = get_user_search_usage(user_id)
+    return jsonify({
+        "success": True,
+        "used_today": used,
+        "remaining_today": remaining,
+        "limit": DAILY_WEB_SEARCH_LIMIT
+    })
 
 @app.route("/api/auth/me", methods=["GET"])
 def auth_me():
@@ -171,7 +274,10 @@ def chat_endpoint():
     if not query:
         return jsonify({"error": "Empty query"}), 400
 
-    result = answer_query(query, model_name=model_name, lang=lang)
+    user = _authenticated_user()
+    user_id = user.get("sub") if user else f"guest_{request.remote_addr}"
+
+    result = answer_query(query, model_name=model_name, lang=lang, user_id=user_id)
     return jsonify(result)
 
 # ----------------- Census Records Search Endpoints -----------------
@@ -1078,6 +1184,141 @@ def admin_delete_file(filename):
     except Exception as e:
         logger.error(f"File delete error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
+
+# ----------------- Admin: Accounts & AI Diagnostics -----------------
+
+@app.route("/api/admin/ai-status", methods=["GET"])
+def admin_ai_status():
+    """
+    Report whether the assistant can actually reach a language model.
+
+    Without this the most common failure — GEMINI_API_KEY not set in the
+    PythonAnywhere environment — is completely invisible: every question
+    quietly falls back to the offline synthesizer, which can only answer from
+    ingested records and manuals, and the assistant appears to be permanently
+    restricted to the PDFs. Pass ?probe=1 to make a live call to the API.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    probe = request.args.get("probe", "").lower() in ("1", "true", "yes")
+    return jsonify({"success": True, "ai": get_ai_status(probe=probe)})
+
+@app.route("/api/admin/users/reset-password", methods=["POST"])
+def admin_reset_password():
+    """
+    Issue a one-time password for a user who has forgotten theirs.
+
+    This is the office-counter workflow: the user turns up in person, the
+    Technical Assistant runs this, reads the temporary password out, and the
+    user is forced to set their own at the next sign-in. The temporary
+    password appears only in this response — it is stored as a PBKDF2 hash
+    like every other password and is never written to the database or logs in
+    readable form.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    data = request.get_json() or {}
+    identifier = (data.get("identifier") or data.get("mobile_number") or "").strip()
+    if not identifier:
+        return jsonify({"success": False, "message": "Enter the user's mobile number or username."}), 400
+
+    actor = (_authenticated_user() or {}).get("name", "admin")
+    result = admin_reset_user_password(identifier, actor=actor)
+    return jsonify(result), (200 if result.get("success") else 404)
+
+@app.route("/api/admin/users/unlock", methods=["POST"])
+def admin_unlock():
+    """Clear a lockout after too many failed sign-in attempts."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    data = request.get_json() or {}
+    identifier = (data.get("identifier") or data.get("mobile_number") or "").strip()
+    if not identifier:
+        return jsonify({"success": False, "message": "Enter the user's mobile number or username."}), 400
+
+    actor = (_authenticated_user() or {}).get("name", "admin")
+    result = admin_unlock_account(identifier, actor=actor)
+    return jsonify(result), (200 if result.get("success") else 404)
+
+@app.route("/api/admin/accounts", methods=["GET"])
+def admin_accounts():
+    """
+    Registered app accounts with the details that actually help diagnose a
+    sign-in problem: when they registered, when they last signed in, how many
+    failed attempts are on record, and whether they are locked or holding a
+    temporary password. No password material is exposed.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    q = (request.args.get("q") or "").strip()
+    conn = get_db_connection()
+    try:
+        sql = """
+            SELECT user_id, name, mobile_number, email, role, functionary_type,
+                   created_at, last_login_at, failed_attempts, locked_until,
+                   must_change_password, status
+            FROM app_users
+        """
+        params = []
+        if q:
+            sql += " WHERE name LIKE ? OR mobile_number LIKE ? OR email LIKE ?"
+            params = [f"%{q}%"] * 3
+        sql += " ORDER BY created_at DESC LIMIT 200"
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+    now = time.time()
+    accounts = []
+    for r in rows:
+        locked_until = r["locked_until"] or 0
+        accounts.append({
+            "user_id": r["user_id"],
+            "name": r["name"],
+            "mobile_number": r["mobile_number"],
+            "email": r["email"] or "",
+            "role": r["role"] or "user",
+            "functionary_type": r["functionary_type"] or "User",
+            "created_at": r["created_at"],
+            "last_login_at": r["last_login_at"],
+            "failed_attempts": r["failed_attempts"] or 0,
+            "locked": locked_until > now,
+            "locked_for_seconds": max(0, int(locked_until - now)),
+            "must_change_password": bool(r["must_change_password"]),
+            "status": r["status"] or "ACTIVE",
+        })
+    return jsonify({"success": True, "accounts": accounts, "total": len(accounts)})
+
+@app.route("/api/admin/auth-audit", methods=["GET"])
+def admin_auth_audit():
+    """Recent authentication events: sign-ins, failures, lockouts, resets."""
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+    except ValueError:
+        limit = 50
+
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT account, event, outcome, detail, actor, ip_address, created_at
+            FROM auth_audit ORDER BY id DESC LIMIT ?
+        """, (limit,)).fetchall()
+    finally:
+        conn.close()
+
+    return jsonify({"success": True, "events": [dict(r) for r in rows]})
 
 # ----------------- Field Attendance Endpoints -----------------
 #

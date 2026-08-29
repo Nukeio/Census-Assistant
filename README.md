@@ -109,6 +109,88 @@ See [`android/BUILD.md`](android/BUILD.md) for the full native build guide. The 
 - **Docker**: build and run the provided `Dockerfile` on any container host.
 - **Traditional WSGI hosting** (e.g. PythonAnywhere): pull the repo, install `requirements.txt`, and point your WSGI config at `server:app`.
 
+## AI Assistant
+
+The assistant answers from **Gemini's own knowledge first**. The ingested
+records and manuals are optional supporting material, not a fence:
+
+- **Ordinary questions** are answered normally, with no requirement that the
+  answer appear in the PDFs.
+- **Local records and manuals** are retrieved and put in front of the model
+  only when they are *actually relevant* to the question. A passage has to be
+  a strong match — roughly two solid keyword hits or a section-heading match —
+  before it is treated as context. Sharing one common word like "house" or
+  "form" is not enough.
+- **Citations are honest.** A `Source: HLO Manual, Page X` line appears only
+  when local material genuinely fed the answer. An answer from the model's own
+  knowledge carries no citation.
+- **Current information** uses Google Search grounding, preferring official
+  sources (censusindia.gov.in, PIB).
+- **Unverifiable facts** are declined rather than invented.
+
+### The daily web-search allowance
+
+Each user gets **10 web searches per day** (IST). The count lives in the
+`user_search_quota` table on the server, keyed on the account — reinstalling
+the app does not reset it.
+
+Ordinary questions never touch the allowance. A search is only charged when
+one is actually performed: the allowance is decremented *after* the call
+succeeds, so a question that merely contains a word like "today" but was
+answered without a lookup costs nothing. Past the limit, questions are still
+answered from the model's knowledge with a note explaining why.
+
+### When the AI appears "restricted to the PDFs"
+
+Almost always this means the server cannot reach a language model, so every
+question falls through to the offline synthesizer, which really can only
+answer from ingested data. **Admin → AI Provider Status** says so directly and
+`GET /api/admin/ai-status?probe=1` returns the same as JSON.
+
+The fix is nearly always to set `GEMINI_API_KEY` in the PythonAnywhere web
+app's environment variables and Reload. On a **free** PythonAnywhere account
+outbound access is allowlist-only; if the key is set but the API is still
+unreachable, also set `OUTBOUND_HTTP_PROXY=http://proxy.server:3128`.
+
+## Authentication
+
+Self-contained: PBKDF2-SHA256 (260,000 iterations, random per-user salt) with
+JWT sessions. No third-party auth service, so sign-in keeps working even when
+outbound network access is restricted, and there is no service key to leak.
+
+| Capability | Endpoint |
+|---|---|
+| Register | `POST /api/auth/register` |
+| Sign in (mobile/email/username + password) | `POST /api/auth/login` |
+| Admin sign in | `POST /api/auth/admin-login` |
+| Request a reset code | `POST /api/auth/forgot-password` |
+| Complete a reset | `POST /api/auth/reset-password` |
+| Change your own password | `POST /api/auth/change-password` |
+| Admin: issue a temporary password | `POST /api/admin/users/reset-password` |
+| Admin: clear a lockout | `POST /api/admin/users/unlock` |
+| Admin: account list | `GET /api/admin/accounts` |
+| Admin: sign-in audit | `GET /api/admin/auth-audit` |
+
+**Passwords are never stored or displayed in readable form**, for users or
+admins. For the walk-in case — someone comes to the office having forgotten
+their password — the Technical Assistant uses **Admin → Account Support** to
+issue a one-time password, reads it out in person, and the user is forced to
+choose their own at the next sign-in. The temporary password appears exactly
+once, in that one API response; it is stored as a PBKDF2 hash like any other
+and never written to the database or the logs.
+
+Other protections:
+
+- Six consecutive failures lock an account for 15 minutes. Counters live in
+  the database, so recycling a worker does not clear them.
+- Sign-in failures return an identical message whether or not the account
+  exists, so the endpoint cannot be used to discover registered numbers.
+- A session holding a temporary password cannot use the admin console until
+  the password is replaced.
+- Every sign-in, failure, lockout, reset and change is written to `auth_audit`.
+- Roles are `user`/`enumerator`/`supervisor` and `admin`; every `/api/admin/*`
+  route enforces the admin guard server-side, independent of the UI.
+
 ## Field Attendance
 
 Field staff open **Attendance** from the home screen (or the side/drawer nav) and
@@ -154,6 +236,18 @@ To verify the whole flow against a running server:
 ```bash
 python -m backend.main                  # in one shell
 python tests/test_attendance_flow.py    # in another
+```
+
+To run the AI and authentication suites, start the bundled Gemini stub so the
+AI paths can be exercised without a real key or outbound internet:
+
+```bash
+python tests/gemini_stub.py 8778 &
+GEMINI_API_BASE=http://127.0.0.1:8778/models GEMINI_API_KEY=stub \
+JWT_SECRET=test PORT=8121 python -m backend.main &
+
+APP_BASE=http://localhost:8121 STUB_BASE=http://127.0.0.1:8778 python tests/test_ai_and_auth.py
+APP_BASE=http://localhost:8121 python tests/test_pdf_grounding.py
 ```
 
 ## Data & Privacy

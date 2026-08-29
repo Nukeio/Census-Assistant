@@ -142,11 +142,14 @@
 
       <!-- Login Form Tabs -->
       <div class="flex border-b border-outline-variant/30 mb-5">
-        <button id="tab-btn-otp" onclick="switchLoginTab('otp')" class="flex-1 py-2 text-sm font-semibold border-b-2 border-primary text-primary transition-colors">
-          Field Functionary (OTP)
+        <button id="tab-btn-otp" onclick="switchLoginTab('otp')" class="flex-1 py-2 text-xs sm:text-sm font-semibold border-b-2 border-primary text-primary transition-colors">
+          OTP
         </button>
-        <button id="tab-btn-admin" onclick="switchLoginTab('admin')" class="flex-1 py-2 text-sm font-semibold border-b-2 border-transparent text-on-surface-variant hover:text-primary transition-colors">
-          Admin Portal
+        <button id="tab-btn-password" onclick="switchLoginTab('password')" class="flex-1 py-2 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-on-surface-variant hover:text-primary transition-colors">
+          Password
+        </button>
+        <button id="tab-btn-admin" onclick="switchLoginTab('admin')" class="flex-1 py-2 text-xs sm:text-sm font-semibold border-b-2 border-transparent text-on-surface-variant hover:text-primary transition-colors">
+          Admin
         </button>
       </div>
 
@@ -165,6 +168,64 @@
         <button type="submit" id="btn-get-otp" class="w-full bg-primary-container text-white font-semibold py-3 px-6 rounded-full shadow-sm hover:bg-primary transition-all flex justify-center items-center gap-2 active:scale-95">
           <span>Get OTP</span>
           <span class="material-symbols-outlined text-lg">arrow_forward</span>
+        </button>
+      </form>
+
+      <!-- Field User Password Form (same styling as the OTP and Admin forms) -->
+      <form id="form-password" onsubmit="handleUserLogin(event)" class="hidden flex-col gap-4">
+        <div class="relative w-full">
+          <input id="user-identifier" type="text" required placeholder=" " autocomplete="username"
+            class="peer block w-full px-4 pt-6 pb-2 text-on-surface bg-surface border border-outline rounded-lg focus:outline-none focus:border-2 focus:border-primary transition-all font-medium" />
+          <label for="user-identifier" class="absolute text-on-surface-variant duration-200 transform -translate-y-3 scale-75 top-4 z-10 origin-[0] left-4 peer-placeholder-shown:scale-100 peer-placeholder-shown:translate-y-0 peer-focus:scale-75 peer-focus:-translate-y-3 peer-focus:text-primary text-sm font-medium">
+            Mobile Number
+          </label>
+        </div>
+        <div class="relative w-full">
+          <input id="user-password" type="password" required placeholder=" " autocomplete="current-password"
+            class="peer block w-full px-4 pt-6 pb-2 text-on-surface bg-surface border border-outline rounded-lg focus:outline-none focus:border-2 focus:border-primary transition-all font-medium" />
+          <label for="user-password" class="absolute text-on-surface-variant duration-200 transform -translate-y-3 scale-75 top-4 z-10 origin-[0] left-4 peer-placeholder-shown:scale-100 peer-placeholder-shown:translate-y-0 peer-focus:scale-75 peer-focus:-translate-y-3 peer-focus:text-primary text-sm font-medium">
+            Password
+          </label>
+        </div>
+        <button type="submit" class="w-full bg-primary text-white font-semibold py-3 px-6 rounded-full shadow-sm hover:bg-primary-container transition-all flex justify-center items-center gap-2 active:scale-95">
+          <span>Sign In</span>
+          <span class="material-symbols-outlined text-lg">login</span>
+        </button>
+        <div class="flex items-center justify-between text-xs">
+          <button type="button" onclick="showRegisterForm()" class="text-primary font-semibold hover:underline">Create an account</button>
+          <button type="button" onclick="handleForgotPassword()" class="text-on-surface-variant font-medium hover:text-primary hover:underline">Forgot password?</button>
+        </div>
+      </form>
+
+      <!-- Registration Form -->
+      <form id="form-register" onsubmit="handleRegister(event)" class="hidden flex-col gap-4">
+        <div class="relative w-full">
+          <input id="reg-name" type="text" required placeholder=" " maxlength="100" autocomplete="name"
+            class="peer block w-full px-4 pt-6 pb-2 text-on-surface bg-surface border border-outline rounded-lg focus:outline-none focus:border-2 focus:border-primary transition-all font-medium" />
+          <label for="reg-name" class="absolute text-on-surface-variant duration-200 transform -translate-y-3 scale-75 top-4 z-10 origin-[0] left-4 peer-placeholder-shown:scale-100 peer-placeholder-shown:translate-y-0 peer-focus:scale-75 peer-focus:-translate-y-3 peer-focus:text-primary text-sm font-medium">
+            Full Name
+          </label>
+        </div>
+        <div class="relative w-full">
+          <input id="reg-mobile" type="tel" required placeholder=" " maxlength="10" inputmode="numeric"
+            class="peer block w-full px-4 pt-6 pb-2 text-on-surface bg-surface border border-outline rounded-lg focus:outline-none focus:border-2 focus:border-primary transition-all font-medium" />
+          <label for="reg-mobile" class="absolute text-on-surface-variant duration-200 transform -translate-y-3 scale-75 top-4 z-10 origin-[0] left-4 peer-placeholder-shown:scale-100 peer-placeholder-shown:translate-y-0 peer-focus:scale-75 peer-focus:-translate-y-3 peer-focus:text-primary text-sm font-medium">
+            Mobile Number (10 digits)
+          </label>
+        </div>
+        <div class="relative w-full">
+          <input id="reg-password" type="password" required placeholder=" " autocomplete="new-password"
+            class="peer block w-full px-4 pt-6 pb-2 text-on-surface bg-surface border border-outline rounded-lg focus:outline-none focus:border-2 focus:border-primary transition-all font-medium" />
+          <label for="reg-password" class="absolute text-on-surface-variant duration-200 transform -translate-y-3 scale-75 top-4 z-10 origin-[0] left-4 peer-placeholder-shown:scale-100 peer-placeholder-shown:translate-y-0 peer-focus:scale-75 peer-focus:-translate-y-3 peer-focus:text-primary text-sm font-medium">
+            Password (min 8 characters)
+          </label>
+        </div>
+        <button type="submit" class="w-full bg-primary text-white font-semibold py-3 px-6 rounded-full shadow-sm hover:bg-primary-container transition-all flex justify-center items-center gap-2 active:scale-95">
+          <span>Create Account</span>
+          <span class="material-symbols-outlined text-lg">person_add</span>
+        </button>
+        <button type="button" onclick="switchLoginTab('password')" class="text-xs text-on-surface-variant font-medium hover:text-primary hover:underline">
+          Already have an account? Sign in
         </button>
       </form>
 
@@ -1154,6 +1215,84 @@
             </div>
           </div>
 
+          <!-- AI Provider Status -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">AI Provider Status</h3>
+                <p class="text-xs text-on-surface-variant">
+                  Whether the assistant can actually reach a language model. If this is unconfigured, every
+                  question falls back to records and manuals only.
+                </p>
+              </div>
+              <button onclick="loadAiStatus(true)" class="text-xs text-primary font-semibold hover:underline flex items-center gap-1 shrink-0">
+                <span class="material-symbols-outlined text-base">network_check</span> Test connection
+              </button>
+            </div>
+            <div id="admin-ai-status" class="rounded-xl border border-outline-variant/40 bg-surface p-4">
+              <div class="flex justify-center p-2"><div class="loader-spinner-primary"></div></div>
+            </div>
+          </div>
+
+          <!-- Account Support (walk-in password help) -->
+          <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
+            <div>
+              <h3 class="text-base font-bold text-on-surface">Account Support</h3>
+              <p class="text-xs text-on-surface-variant">
+                For a user who comes to the office having forgotten their password. Issue a one-time password,
+                read it to them in person, and they will be asked to set their own at the next sign-in.
+                Passwords are never stored or shown in readable form.
+              </p>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input id="support-identifier" type="text" placeholder="Mobile number or username"
+                class="flex-1 px-3 py-2 rounded-lg border border-outline-variant bg-surface text-sm text-on-surface focus:border-primary outline-none" />
+              <button onclick="handleAdminResetPassword()"
+                class="px-4 py-2 bg-primary text-white text-xs font-semibold rounded-full hover:bg-primary-container transition-all active:scale-95 flex items-center justify-center gap-1.5">
+                <span class="material-symbols-outlined text-base">lock_reset</span> Issue temporary password
+              </button>
+              <button onclick="handleAdminUnlock()"
+                class="px-4 py-2 text-xs font-semibold rounded-full border border-outline-variant text-on-surface-variant hover:bg-surface-container-low transition-colors flex items-center justify-center gap-1.5">
+                <span class="material-symbols-outlined text-base">lock_open</span> Unlock
+              </button>
+            </div>
+
+            <div id="support-result" class="hidden rounded-xl border p-4"></div>
+
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <h4 class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Registered Accounts</h4>
+                <button onclick="loadAdminAccounts()" class="text-xs text-primary font-semibold hover:underline">Refresh</button>
+              </div>
+              <div class="overflow-x-auto border border-outline-variant/20 rounded-xl">
+                <table class="w-full text-left text-xs">
+                  <thead class="bg-surface-container text-on-surface-variant font-semibold uppercase tracking-wider text-[10px]">
+                    <tr>
+                      <th class="p-3">Name</th>
+                      <th class="p-3">Mobile</th>
+                      <th class="p-3">Role</th>
+                      <th class="p-3">Registered</th>
+                      <th class="p-3">Last Sign-In</th>
+                      <th class="p-3">State</th>
+                    </tr>
+                  </thead>
+                  <tbody id="admin-accounts-body" class="divide-y divide-outline-variant/20 bg-surface">
+                    <tr><td colspan="6" class="p-4 text-center text-on-surface-variant">Loading accounts...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <h4 class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Recent Sign-In Activity</h4>
+                <button onclick="loadAuthAudit()" class="text-xs text-primary font-semibold hover:underline">Refresh</button>
+              </div>
+              <div id="admin-auth-audit" class="space-y-1.5 max-h-64 overflow-y-auto pr-1"></div>
+            </div>
+          </div>
+
           <!-- Field Attendance Register -->
           <div class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
             <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -1428,6 +1567,34 @@
           Reject
         </button>
       </div>
+    </div>
+  </div>
+
+  <!-- Forced Password Change (after an admin-issued temporary password) -->
+  <div id="modal-change-password" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-surface-container-lowest rounded-2xl shadow-2xl p-6 w-full max-w-sm border border-outline-variant/30 animate-fade-in">
+      <div class="text-center mb-4">
+        <span class="material-symbols-outlined text-primary text-4xl">key</span>
+        <h3 id="change-password-title" class="text-lg font-bold text-on-surface mt-1">Set a new password</h3>
+        <p id="change-password-sub" class="text-xs text-on-surface-variant mt-1">
+          You signed in with a temporary password. Choose your own to continue.
+        </p>
+      </div>
+      <form onsubmit="handleChangePassword(event)" class="flex flex-col gap-3">
+        <input id="cp-current" type="password" required placeholder="Temporary / current password" autocomplete="current-password"
+          class="w-full px-4 py-2.5 rounded-lg border border-outline-variant bg-surface text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary outline-none" />
+        <input id="cp-new" type="password" required placeholder="New password (min 8 characters)" autocomplete="new-password"
+          class="w-full px-4 py-2.5 rounded-lg border border-outline-variant bg-surface text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary outline-none" />
+        <input id="cp-confirm" type="password" required placeholder="Confirm new password" autocomplete="new-password"
+          class="w-full px-4 py-2.5 rounded-lg border border-outline-variant bg-surface text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary outline-none" />
+        <button type="submit" class="w-full py-2.5 bg-primary text-white text-sm font-bold rounded-full hover:bg-primary-container transition-all active:scale-95">
+          Update Password
+        </button>
+        <button type="button" id="cp-cancel" onclick="closeChangePasswordModal()"
+          class="w-full py-2 text-xs font-semibold text-on-surface-variant rounded-full border border-outline-variant hover:bg-surface-container-low transition-colors">
+          Cancel
+        </button>
+      </form>
     </div>
   </div>
 

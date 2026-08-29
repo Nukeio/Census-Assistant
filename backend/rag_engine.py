@@ -431,6 +431,11 @@ def search_manual_chunks(query: str, limit: int = 4) -> List[Dict[str, Any]]:
             "page_number": row["page_number"],
             "section_header": row["section_header"],
             "chunk_text": row["chunk_text"],
+            # Exposed so callers can distinguish "this passage genuinely answers
+            # the question" from "this passage happens to contain the word
+            # 'house'". retrieve_rag_context uses it to decide whether the
+            # manual is worth putting in front of the model at all.
+            "relevance": score,
             "source": f"{row['doc_title']}, Page {row['page_number']}"
         })
 
@@ -449,12 +454,38 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         if intent == INTENT_RECORD_SEARCH and not record_results:
             record_results = search_by_area(query, limit=5)
 
-    # Always search manual guidelines if manual intent OR if no records OR if query is instructional
+    # Manual retrieval.
+    #
+    # We still LOOK for manual passages on most questions — cheap, and it is
+    # how a genuine procedural question finds its answer. What changed is the
+    # bar for actually putting them in front of the model.
+    #
+    # The old behaviour matched a bare keyword list ("how", "what", "house",
+    # "form", "app"...), which fires on almost any sentence, and every hit was
+    # then injected with a "prioritize these documents" instruction. The result
+    # was that general questions got steered into the manuals and answered as
+    # though the assistant could only speak from them.
+    #
+    # Now a passage has to actually be about the question. MANUAL_SEARCH intent
+    # keeps the old low bar because the user explicitly asked about the
+    # manuals; everything else needs a strong match (roughly two solid keyword
+    # hits, or a section-heading match) before it is treated as context.
     manual_keywords = ["how", "what", "rule", "procedure", "definition", "define", "meaning", "duty", "duties", "building", "house", "household", "form", "app", "map", "pencil", "pen", "eligible", "sync"]
     is_instructional = any(k in query.lower() for k in manual_keywords)
 
     if intent == INTENT_MANUAL_SEARCH or not record_results or is_instructional:
         manual_results = search_manual_chunks(query, limit=4)
+
+    MANUAL_STRONG_RELEVANCE = 6
+    manual_is_relevant = bool(manual_results) and (
+        intent == INTENT_MANUAL_SEARCH
+        or max((m.get("relevance", 0) for m in manual_results), default=0) >= MANUAL_STRONG_RELEVANCE
+    )
+    weak_manual_results: List[Dict[str, Any]] = []
+    if not manual_is_relevant:
+        # Keep them for the "related reading" affordance, but do not let them
+        # shape the answer or claim a citation.
+        weak_manual_results, manual_results = manual_results, []
 
     # Compile context strings
     context_parts = []
@@ -503,7 +534,14 @@ def retrieve_rag_context(query: str) -> Dict[str, Any]:
         "query": query,
         "record_results": record_results,
         "manual_results": manual_results,
+        # Manual passages that were found but judged too weak to steer the
+        # answer. Offered to the caller as optional further reading only.
+        "related_manual_results": weak_manual_results,
         "context_text": "\n".join(context_parts),
+        # Only sources that actually went into the prompt. answer_query cites
+        # these and nothing else, so an answer drawn from the model's own
+        # knowledge is never labelled as coming from the HLO Manual.
         "citations": list(set(citations)),
+        "has_local_context": bool(record_results or manual_results),
         "contact_info": contact_block
     }

@@ -22,6 +22,21 @@ def get_db_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
+def _ensure_column(cursor, table: str, column: str, ddl: str) -> None:
+    """
+    Add a column to an existing table if it isn't there yet.
+
+    SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS, and databases that
+    already exist in production (PythonAnywhere's census_assistant.db) were
+    created before these columns existed. Checking PRAGMA table_info keeps
+    startup idempotent instead of relying on a caught exception.
+    """
+    existing = {row["name"] for row in cursor.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        logger.info(f"Schema migration: added {table}.{column}")
+
+
 def init_database():
     """Initialize SQLite database tables and Full-Text Search virtual tables."""
     conn = get_db_connection()
@@ -139,6 +154,50 @@ def init_database():
         """)
 
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT UNIQUE NOT NULL,
+                mobile_number TEXT UNIQUE,
+                email TEXT UNIQUE,
+                name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                functionary_type TEXT DEFAULT 'User',
+                reset_token TEXT,
+                reset_token_expires REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_search_quota (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_identifier TEXT NOT NULL,
+                search_date TEXT NOT NULL,
+                search_count INTEGER DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_identifier, search_date)
+            )
+        """)
+
+        # Authentication audit trail. Every login attempt, password change and
+        # admin-initiated reset lands here, so a locked-out user or a suspicious
+        # burst of failures can be investigated after the fact.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS auth_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account TEXT,
+                event TEXT NOT NULL,
+                outcome TEXT,
+                detail TEXT,
+                actor TEXT,
+                ip_address TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS system_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT,
@@ -157,6 +216,30 @@ def init_database():
         # ------------------------------------------------------------------ #
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_functionaries_name ON functionaries(name)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_functionaries_mobile ON functionaries(mobile_number)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_users_mobile ON app_users(mobile_number)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_app_users_email ON app_users(email)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_search_quota_user_date ON user_search_quota(user_identifier, search_date)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_audit_account ON auth_audit(account, created_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_auth_audit_created ON auth_audit(created_at)")
+
+        # ------------------------------------------------------------------ #
+        # Column migrations for databases created by an earlier version       #
+        # ------------------------------------------------------------------ #
+        # must_change_password backs the walk-in support flow: an admin sets a
+        # temporary password, and the user is forced to choose a new one on
+        # their next sign-in. failed_attempts/locked_until throttle password
+        # guessing without ever needing the password itself in readable form.
+        _ensure_column(cursor, "app_users", "must_change_password", "INTEGER DEFAULT 0")
+        _ensure_column(cursor, "app_users", "failed_attempts", "INTEGER DEFAULT 0")
+        _ensure_column(cursor, "app_users", "locked_until", "REAL")
+        _ensure_column(cursor, "app_users", "last_login_at", "TIMESTAMP")
+        _ensure_column(cursor, "app_users", "status", "TEXT DEFAULT 'ACTIVE'")
+        _ensure_column(cursor, "admin_users", "must_change_password", "INTEGER DEFAULT 0")
+        _ensure_column(cursor, "admin_users", "failed_attempts", "INTEGER DEFAULT 0")
+        _ensure_column(cursor, "admin_users", "locked_until", "REAL")
+        _ensure_column(cursor, "admin_users", "last_login_at", "TIMESTAMP")
+        _ensure_column(cursor, "admin_users", "reset_token", "TEXT")
+        _ensure_column(cursor, "admin_users", "reset_token_expires", "REAL")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_hlb_no ON hlb_allocations(hlb_no)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_circle ON hlb_allocations(supervisory_circle_no)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_hlb_allocations_user ON hlb_allocations(enumerator_user_id)")

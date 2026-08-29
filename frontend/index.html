@@ -393,13 +393,7 @@
           <div class="grid grid-cols-1 md:grid-cols-12 gap-5">
 
             <!-- Quick Actions Grid -->
-            <div class="md:col-span-12 grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <button onclick="navigateTo('chat')" class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-4 flex flex-col items-center justify-center text-center gap-2 hover:bg-surface-container-low transition-all shadow-[0_2px_4px_rgba(0,0,0,0.02)] active:scale-95">
-                <div class="w-11 h-11 rounded-full bg-primary-container/10 flex items-center justify-center text-primary">
-                  <span class="material-symbols-outlined text-2xl">smart_toy</span>
-                </div>
-                <span class="text-sm font-semibold text-on-surface" data-i18n="ask_ai">Ask AI</span>
-              </button>
+            <div class="md:col-span-12 grid grid-cols-2 sm:grid-cols-3 gap-3">
               <button onclick="navigateTo('search')" class="bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-4 flex flex-col items-center justify-center text-center gap-2 hover:bg-surface-container-low transition-all shadow-[0_2px_4px_rgba(0,0,0,0.02)] active:scale-95">
                 <div class="w-11 h-11 rounded-full bg-primary-container/10 flex items-center justify-center text-primary">
                   <span class="material-symbols-outlined text-2xl">manage_search</span>
@@ -577,6 +571,7 @@
                 <button onclick="setSearchFilter('mobile')" id="filter-mobile" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">Mobile</button>
                 <button onclick="setSearchFilter('id')" id="filter-id" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">User ID</button>
                 <button onclick="setSearchFilter('hlb')" id="filter-hlb" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">HLB</button>
+                <button onclick="setSearchFilter('supervisor')" id="filter-supervisor" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">Supervisor</button>
               </div>
             </div>
           </div>
@@ -682,7 +677,7 @@
           <div class="relative w-full">
             <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant">search</span>
             <input id="supervisor-search-input" oninput="debounceSupervisorSearch()" type="text"
-              placeholder="Search supervisors by name, ID, or mobile..."
+              placeholder="Search supervisors by name, ID, mobile, or circle number..."
               class="w-full bg-surface-container-lowest border border-outline-variant rounded-full py-3.5 pl-12 pr-4 text-sm text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary shadow-sm transition-all" />
           </div>
 
@@ -904,7 +899,7 @@
                 </div>
               </div>
               
-              <div onclick="document.getElementById('excel-file-input').click()"
+              <div id="excel-upload-dropzone" onclick="document.getElementById('excel-file-input').click()"
                 class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer">
                 <input type="file" id="excel-file-input" accept=".xlsx,.xls" class="hidden" onchange="handleExcelUpload(this)" />
                 <div class="w-12 h-12 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-2">
@@ -912,6 +907,16 @@
                 </div>
                 <p class="text-sm font-semibold text-on-surface">Click to upload Excel data</p>
                 <p class="text-xs text-on-surface-variant mt-0.5">Accepts .xlsx, .xls (Max 50MB)</p>
+              </div>
+              <!-- Upload Progress (hidden until a file is actively uploading) -->
+              <div id="excel-upload-progress-wrap" class="hidden flex flex-col gap-1.5">
+                <div class="flex items-center justify-between text-xs">
+                  <span id="excel-upload-progress-label" class="text-on-surface-variant truncate">Uploading...</span>
+                  <span id="excel-upload-progress-pct" class="text-primary font-semibold shrink-0 ml-2">0%</span>
+                </div>
+                <div class="w-full h-2 rounded-full bg-surface-variant/50 overflow-hidden">
+                  <div id="excel-upload-progress-bar" class="h-full bg-primary rounded-full transition-[width] duration-150" style="width:0%"></div>
+                </div>
               </div>
             </div>
 
@@ -922,7 +927,7 @@
                 <p class="text-xs text-on-surface-variant">Add new guideline manuals or FAQs.</p>
               </div>
 
-              <div onclick="document.getElementById('pdf-file-input').click()"
+              <div id="pdf-upload-dropzone" onclick="document.getElementById('pdf-file-input').click()"
                 class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer flex-1">
                 <input type="file" id="pdf-file-input" accept=".pdf" class="hidden" onchange="handlePdfUpload(this)" />
                 <div class="w-12 h-12 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-2">
@@ -930,6 +935,16 @@
                 </div>
                 <p class="text-sm font-semibold text-on-surface">Click to upload PDF</p>
                 <p class="text-xs text-on-surface-variant mt-0.5">Auto-chunked & Porter stemmed</p>
+              </div>
+              <!-- Upload Progress (hidden until a file is actively uploading) -->
+              <div id="pdf-upload-progress-wrap" class="hidden flex flex-col gap-1.5">
+                <div class="flex items-center justify-between text-xs">
+                  <span id="pdf-upload-progress-label" class="text-on-surface-variant truncate">Uploading...</span>
+                  <span id="pdf-upload-progress-pct" class="text-primary font-semibold shrink-0 ml-2">0%</span>
+                </div>
+                <div class="w-full h-2 rounded-full bg-surface-variant/50 overflow-hidden">
+                  <div id="pdf-upload-progress-bar" class="h-full bg-primary rounded-full transition-[width] duration-150" style="width:0%"></div>
+                </div>
               </div>
             </div>
           </div>

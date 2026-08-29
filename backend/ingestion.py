@@ -16,6 +16,73 @@ logging.basicConfig(level=logging.INFO)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 
+def excel_data_type(filename: str) -> str:
+    """
+    Classify an uploaded Excel file by filename keyword so upload, delete,
+    and re-sync all agree on which table it backs. Shared by upload_excel()
+    and remove_source_file_data() in main.py so the routing logic can never
+    drift out of sync between the two.
+    """
+    lower = (filename or "").lower()
+    if "description" in lower:
+        return "hlb_description"
+    if "user" in lower:
+        return "users"
+    return "hlb_allocation"
+
+
+def remove_source_file_data(filename: str) -> dict:
+    """
+    Delete the DB rows that came from a specific uploaded source file, used
+    when an admin deletes that file from the Admin Panel. Previously,
+    deleting a file just removed it from disk and re-ran full ingestion —
+    which silently skipped re-processing (since the file was now gone)
+    WITHOUT ever clearing the rows it had originally inserted, so "deleted"
+    data kept showing up everywhere in the app. This targets exactly the
+    rows that file is responsible for.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    removed = {}
+
+    if ext == ".pdf":
+        cursor.execute("SELECT COUNT(*) FROM manual_chunks WHERE source_file = ?", (filename,))
+        removed["manual_chunks"] = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM manual_chunks WHERE source_file = ?", (filename,))
+        try:
+            cursor.execute("DELETE FROM manual_chunks_fts WHERE source_file = ?", (filename,))
+        except Exception:
+            pass
+    else:
+        data_type = excel_data_type(filename)
+        if data_type == "hlb_description":
+            cursor.execute("SELECT COUNT(*) FROM hlb_descriptions")
+            removed["hlb_descriptions"] = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM hlb_descriptions")
+        elif data_type == "users":
+            cursor.execute("SELECT COUNT(*) FROM functionaries")
+            removed["functionaries"] = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM functionaries")
+            try:
+                cursor.execute("DELETE FROM functionaries_fts")
+            except Exception:
+                pass
+        else:
+            cursor.execute("SELECT COUNT(*) FROM hlb_allocations")
+            removed["hlb_allocations"] = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM hlb_allocations")
+            try:
+                cursor.execute("DELETE FROM hlb_allocations_fts")
+            except Exception:
+                pass
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Removed data sourced from {filename}: {removed}")
+    return removed
+
+
 def ingest_all_users(filepath: str = None) -> int:
     """Ingest All_Users.xlsx into functionaries table."""
     if not filepath:
@@ -179,110 +246,130 @@ def ingest_hlb_description(filepath: str = None) -> int:
     return inserted
 
 
-def ingest_pdf_manuals() -> int:
-    """Ingest FAQ and HLO manuals into manual_chunks with section and page mapping."""
-    pdf_files = [
-        {
-            "filename": "FAQ (E & S).c58cf9c49a6df89a94b3 (1).pdf",
-            "doc_title": "Census 2027 FAQ for Enumerators and Supervisors",
-            "source_type": "FAQ"
-        },
-        {
-            "filename": "HLO_Manual_English.pdf",
-            "doc_title": "House Listing Operations (HLO) Instruction Manual",
-            "source_type": "Manual"
-        }
-    ]
+# Nicer known titles for the two manuals shipped with the app. Any other
+# PDF an admin uploads still gets indexed (see _ingest_single_pdf below) —
+# it just falls back to a title derived from its filename.
+KNOWN_PDF_TITLES = {
+    "FAQ (E & S).c58cf9c49a6df89a94b3 (1).pdf": "Census 2027 FAQ for Enumerators and Supervisors",
+    "HLO_Manual_English.pdf": "House Listing Operations (HLO) Instruction Manual",
+}
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
 
-    cursor.execute("DELETE FROM manual_chunks")
+def _ingest_single_pdf(cursor, filepath: str) -> int:
+    """
+    Parse one PDF into manual_chunks. Only ever touches rows tagged with
+    THIS file's name (source_file), so processing/re-processing one manual
+    never disturbs chunks belonging to any other manual — which is what
+    lets multiple PDFs coexist and get deleted independently.
+    """
+    filename = os.path.basename(filepath)
+    doc_title = KNOWN_PDF_TITLES.get(filename) or (
+        os.path.splitext(filename)[0].replace("_", " ").replace("-", " ").strip() or filename
+    )
+
+    cursor.execute("DELETE FROM manual_chunks WHERE source_file = ?", (filename,))
     try:
-        cursor.execute("DELETE FROM manual_chunks_fts")
+        cursor.execute("DELETE FROM manual_chunks_fts WHERE source_file = ?", (filename,))
     except Exception:
         pass
-    conn.commit()
 
-    total_chunks = 0
+    if not os.path.exists(filepath):
+        logger.warning(f"PDF file not found: {filepath}")
+        return 0
 
-    for pdf_info in pdf_files:
-        filepath = os.path.join(ROOT_DIR, pdf_info["filename"])
-        if not os.path.exists(filepath):
-            logger.warning(f"PDF file not found: {filepath}")
-            continue
+    logger.info(f"Parsing PDF: {filename}...")
+    chunk_count = 0
+    try:
+        reader = pypdf.PdfReader(filepath)
+        num_pages = len(reader.pages)
+        for page_num, page in enumerate(reader.pages, start=1):
+            try:
+                text = page.extract_text() or ""
+            except Exception as e:
+                logger.warning(f"Error reading page {page_num} in {filename}: {e}")
+                continue
 
-        logger.info(f"Parsing PDF: {pdf_info['filename']}...")
-        try:
-            reader = pypdf.PdfReader(filepath)
-            num_pages = len(reader.pages)
-            for page_num, page in enumerate(reader.pages, start=1):
-                try:
-                    text = page.extract_text() or ""
-                except Exception as e:
-                    logger.warning(f"Error reading page {page_num} in {pdf_info['filename']}: {e}")
-                    continue
+            if not text.strip():
+                continue
 
-                if not text.strip():
-                    continue
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+            if not paragraphs:
+                paragraphs = [text.strip()]
 
-                paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-                if not paragraphs:
-                    paragraphs = [text.strip()]
+            current_chunk = ""
+            current_header = ""
 
-                current_chunk = ""
-                current_header = ""
+            for p in paragraphs:
+                header_match = re.match(r'^(Q\.\s*\d+|Question\s*\d+|Chapter\s*\d+|\d+\.\d+|\b[A-Z\s]{4,}\b)', p)
+                if header_match:
+                    current_header = header_match.group(0)
 
-                for p in paragraphs:
-                    header_match = re.match(r'^(Q\.\s*\d+|Question\s*\d+|Chapter\s*\d+|\d+\.\d+|\b[A-Z\s]{4,}\b)', p)
+                # Keep chunk within 800 chars, but if a question starts, keep it intact
+                if len(current_chunk) + len(p) < 800 and not (current_chunk and header_match):
+                    current_chunk += ("\n\n" + p) if current_chunk else p
+                else:
+                    if current_chunk.strip():
+                        cursor.execute("""
+                            INSERT INTO manual_chunks (source_file, doc_title, page_number, section_header, chunk_text)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (filename, doc_title, page_num, current_header, current_chunk.strip()))
+                        row_id = cursor.lastrowid
+                        try:
+                            cursor.execute("""
+                                INSERT INTO manual_chunks_fts (rowid, source_file, doc_title, page_number, section_header, chunk_text)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, (row_id, filename, doc_title, str(page_num), current_header, current_chunk.strip()))
+                        except Exception:
+                            pass
+                        chunk_count += 1
+                    current_chunk = p
                     if header_match:
                         current_header = header_match.group(0)
 
-                    # Keep chunk within 800 chars, but if a question starts, keep it intact
-                    if len(current_chunk) + len(p) < 800 and not (current_chunk and header_match):
-                        current_chunk += ("\n\n" + p) if current_chunk else p
-                    else:
-                        if current_chunk.strip():
-                            cursor.execute("""
-                                INSERT INTO manual_chunks (source_file, doc_title, page_number, section_header, chunk_text)
-                                VALUES (?, ?, ?, ?, ?)
-                            """, (pdf_info["filename"], pdf_info["doc_title"], page_num, current_header, current_chunk.strip()))
-                            row_id = cursor.lastrowid
-                            try:
-                                cursor.execute("""
-                                    INSERT INTO manual_chunks_fts (rowid, source_file, doc_title, page_number, section_header, chunk_text)
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                """, (row_id, pdf_info["filename"], pdf_info["doc_title"], str(page_num), current_header, current_chunk.strip()))
-                            except Exception:
-                                pass
-                            total_chunks += 1
-                        current_chunk = p
-                        if header_match:
-                            current_header = header_match.group(0)
-
-                if current_chunk.strip():
+            if current_chunk.strip():
+                cursor.execute("""
+                    INSERT INTO manual_chunks (source_file, doc_title, page_number, section_header, chunk_text)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (filename, doc_title, page_num, current_header, current_chunk.strip()))
+                row_id = cursor.lastrowid
+                try:
                     cursor.execute("""
-                        INSERT INTO manual_chunks (source_file, doc_title, page_number, section_header, chunk_text)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (pdf_info["filename"], pdf_info["doc_title"], page_num, current_header, current_chunk.strip()))
-                    row_id = cursor.lastrowid
-                    try:
-                        cursor.execute("""
-                            INSERT INTO manual_chunks_fts (rowid, source_file, doc_title, page_number, section_header, chunk_text)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (row_id, pdf_info["filename"], pdf_info["doc_title"], str(page_num), current_header, current_chunk.strip()))
-                    except Exception:
-                        pass
-                    total_chunks += 1
+                        INSERT INTO manual_chunks_fts (rowid, source_file, doc_title, page_number, section_header, chunk_text)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (row_id, filename, doc_title, str(page_num), current_header, current_chunk.strip()))
+                except Exception:
+                    pass
+                chunk_count += 1
 
-                # Commit every 10 pages
-                if page_num % 10 == 0:
-                    conn.commit()
-                    logger.info(f"Processed {page_num}/{num_pages} pages of {pdf_info['filename']}")
+        logger.info(f"Parsed {chunk_count} chunks from {filename}")
+    except Exception as e:
+        logger.error(f"Error reading PDF {filename}: {e}")
 
-            conn.commit()
-        except Exception as e:
-            logger.error(f"Error reading PDF {pdf_info['filename']}: {e}")
+    return chunk_count
+
+
+def ingest_pdf_manuals(filepath: str = None) -> int:
+    """
+    Ingest PDF manuals into manual_chunks, keyed per source file.
+
+    Called with a specific filepath (a fresh admin upload), only that one
+    file's chunks are touched — every other manual's chunks stay exactly as
+    they were. Called with no argument (Force Sync / full resync), every
+    *.pdf currently present in ROOT_DIR is (re)processed. This is the fix
+    for uploads silently not "taking": previously this always looked for
+    exactly two hardcoded filenames, so a newly uploaded manual under any
+    other name was never indexed at all.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    total_chunks = 0
+    if filepath:
+        total_chunks = _ingest_single_pdf(cursor, filepath)
+    else:
+        for fname in sorted(os.listdir(ROOT_DIR)):
+            if fname.lower().endswith(".pdf"):
+                total_chunks += _ingest_single_pdf(cursor, os.path.join(ROOT_DIR, fname))
 
     cursor.execute("""
         INSERT OR REPLACE INTO system_settings (key, value, updated_at)

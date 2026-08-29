@@ -695,7 +695,7 @@ function setSearchFilter(filterName) {
   state.recordsFilter = filterName;
   state.recordsPage = 1;
 
-  ["all", "name", "mobile", "id", "hlb"].forEach(f => {
+  ["all", "name", "mobile", "id", "hlb", "supervisor"].forEach(f => {
     const btn = document.getElementById(`filter-${f}`);
     if (btn) {
       if (f === filterName) {
@@ -1371,21 +1371,76 @@ async function triggerForceSync() {
   }
 }
 
+/**
+ * Uploads a file with real upload progress. fetch() has no way to observe
+ * upload progress (only download/response progress), so this uses
+ * XMLHttpRequest directly — the only browser API that exposes
+ * xhr.upload.onprogress — to drive the Admin Panel's progress bars.
+ * Returns a Promise resolving to the parsed JSON body on any HTTP response
+ * (mirrors apiFetch + res.json(), so callers still check data.success),
+ * and rejecting only on a genuine network failure.
+ */
+function uploadFileWithProgress(path, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", getApiBase() + path, true);
+    if (state.authToken) {
+      xhr.setRequestHeader("Authorization", `Bearer ${state.authToken}`);
+    }
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      let data;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch (err) {
+        reject(new Error("Invalid server response."));
+        return;
+      }
+      resolve(data);
+    };
+    xhr.onerror = () => reject(new Error("Network error during upload."));
+    xhr.send(formData);
+  });
+}
+
+function setUploadProgressUi(kind, { visible, pct = 0, label = "Uploading..." } = {}) {
+  const wrap = document.getElementById(`${kind}-upload-progress-wrap`);
+  const bar = document.getElementById(`${kind}-upload-progress-bar`);
+  const pctEl = document.getElementById(`${kind}-upload-progress-pct`);
+  const labelEl = document.getElementById(`${kind}-upload-progress-label`);
+  const dropzone = document.getElementById(`${kind}-upload-dropzone`);
+
+  if (wrap) wrap.classList.toggle("hidden", !visible);
+  if (bar) bar.style.width = `${pct}%`;
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  if (labelEl) labelEl.textContent = label;
+  // Block re-triggering a second upload (and dim the dropzone) while one is in flight.
+  if (dropzone) {
+    dropzone.classList.toggle("opacity-50", visible);
+    dropzone.classList.toggle("pointer-events-none", visible);
+  }
+}
+
 async function handleExcelUpload(input) {
   const file = input.files[0];
   if (!file) return;
 
-  const formData = new FormData();
-  formData.append("file", file);
-
-  showToast(`Uploading ${file.name}...`);
+  setUploadProgressUi("excel", { visible: true, pct: 0, label: `Uploading ${file.name}...` });
   try {
-    const res = await apiFetch("/api/admin/upload-excel", {
-      method: "POST",
-      body: formData
+    const data = await uploadFileWithProgress("/api/admin/upload-excel", file, (pct) => {
+      setUploadProgressUi("excel", { visible: true, pct, label: `Uploading ${file.name}...` });
     });
-    const data = await res.json();
     if (data.success) {
+      setUploadProgressUi("excel", { visible: true, pct: 100, label: "Processing..." });
       showToast(data.message);
       loadAdminStats();
       loadUploadedFiles();
@@ -1394,6 +1449,8 @@ async function handleExcelUpload(input) {
     }
   } catch (err) {
     showToast("Excel upload failed.");
+  } finally {
+    setTimeout(() => setUploadProgressUi("excel", { visible: false }), 600);
   }
   input.value = "";
 }
@@ -1402,17 +1459,13 @@ async function handlePdfUpload(input) {
   const file = input.files[0];
   if (!file) return;
 
-  const formData = new FormData();
-  formData.append("file", file);
-
-  showToast(`Uploading and chunking ${file.name}...`);
+  setUploadProgressUi("pdf", { visible: true, pct: 0, label: `Uploading ${file.name}...` });
   try {
-    const res = await apiFetch("/api/admin/upload-pdf", {
-      method: "POST",
-      body: formData
+    const data = await uploadFileWithProgress("/api/admin/upload-pdf", file, (pct) => {
+      setUploadProgressUi("pdf", { visible: true, pct, label: `Uploading ${file.name}...` });
     });
-    const data = await res.json();
     if (data.success) {
+      setUploadProgressUi("pdf", { visible: true, pct: 100, label: "Chunking & indexing..." });
       showToast(data.message);
       loadAdminStats();
       loadUploadedFiles();
@@ -1421,6 +1474,8 @@ async function handlePdfUpload(input) {
     }
   } catch (err) {
     showToast("PDF upload failed.");
+  } finally {
+    setTimeout(() => setUploadProgressUi("pdf", { visible: false }), 600);
   }
   input.value = "";
 }

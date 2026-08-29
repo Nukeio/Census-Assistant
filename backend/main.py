@@ -15,7 +15,10 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 from .database import get_db_connection, init_database, DB_PATH
-from .ingestion import run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals
+from .ingestion import (
+    run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals,
+    excel_data_type, remove_source_file_data
+)
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query
 from .auth import create_guest_session, request_otp, verify_otp, admin_login, verify_jwt_token
@@ -314,7 +317,15 @@ def records_search():
     where_clauses = []
     params = []
 
-    if q:
+    if filter_by == "supervisor":
+        # Unlike the other filters, this one applies even with an empty
+        # query — so selecting "Supervisor" with nothing typed browses every
+        # supervisor, the same way the results list works with "All".
+        where_clauses.append("f.functionary_type LIKE '%Supervisor%'")
+        if q:
+            where_clauses.append("(f.name LIKE ? OR f.user_id LIKE ? OR f.mobile_number LIKE ?)")
+            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+    elif q:
         if filter_by == "name":
             where_clauses.append("f.name LIKE ?")
             params.append(f"%{q}%")
@@ -421,8 +432,26 @@ def supervisor_list():
     where_sql = "WHERE functionary_type LIKE '%Supervisor%'"
     params = []
     if q:
-        where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
-        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+        if q.isdigit() and len(q) <= 3:
+            # A short digit string is almost certainly a supervisory circle
+            # number (e.g. "1" or "001"), not a name/mobile/ID fragment.
+            # This has to be routed separately rather than OR'd in below:
+            # every user_id in this dataset embeds a shared district/
+            # sub-district code (e.g. "sv_1904001_..."), so a plain
+            # "user_id LIKE '%001%'" would spuriously match nearly every
+            # supervisor regardless of their actual circle. A supervisor
+            # doesn't carry their own circle number as a column either —
+            # it only exists on the HLB allocation rows of the enumerators
+            # reporting to them — so this checks whether their name shows
+            # up against that circle in hlb_allocations instead.
+            where_sql += """ AND name IN (
+                SELECT DISTINCT supervisor_name FROM hlb_allocations
+                WHERE supervisory_circle_no LIKE ? OR supervisory_circle_no = ?
+            )"""
+            params.extend([f"%{q}%", q])
+        else:
+            where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
+            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
     if not show_disabled:
         where_sql += " AND (status IS NULL OR UPPER(status) = 'ACTIVE')"
 
@@ -662,10 +691,14 @@ def upload_excel():
     target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
-    # Ingest based on filename keywords
-    if "user" in filename.lower():
+    # Ingest based on filename keywords (excel_data_type is the single
+    # source of truth for this routing — remove_source_file_data() uses the
+    # exact same classifier so upload/delete can never disagree about which
+    # table a given filename backs).
+    data_type = excel_data_type(filename)
+    if data_type == "users":
         cnt = ingest_all_users(target_path)
-    elif "description" in filename.lower():
+    elif data_type == "hlb_description":
         cnt = ingest_hlb_description(target_path)
     else:
         cnt = ingest_hlb_allocation(target_path)
@@ -695,10 +728,12 @@ def upload_pdf():
     target_path = os.path.join(ROOT_DIR, filename)
     file.save(target_path)
 
-    cnt = ingest_pdf_manuals()
+    # Ingest just this one file — every other manual's existing chunks are
+    # left untouched (see ingest_pdf_manuals docstring).
+    cnt = ingest_pdf_manuals(target_path)
     return jsonify({
         "success": True,
-        "message": f"PDF {filename} uploaded and processed ({cnt} total chunks indexed)."
+        "message": f"PDF {filename} uploaded and processed ({cnt} chunks indexed)."
     })
 
 @app.route("/api/admin/logs", methods=["GET"])
@@ -884,10 +919,18 @@ def admin_delete_file(filename):
         return jsonify({"success": False, "error": "File does not exist."}), 404
 
     try:
+        # Purge exactly the rows this file is responsible for BEFORE removing
+        # it from disk. A prior version deleted the file then called a full
+        # re-ingestion, which — finding the file already gone — just skipped
+        # re-processing it without ever clearing its old rows, so "deleted"
+        # data kept showing up throughout the app. This removes it directly.
+        removed = remove_source_file_data(safe_name)
         os.remove(full_path)
-        # Trigger re-index
-        run_full_ingestion()
-        return jsonify({"success": True, "message": f"File {safe_name} deleted and knowledge base updated."})
+        return jsonify({
+            "success": True,
+            "message": f"File {safe_name} deleted and its data removed from the app.",
+            "removed": removed
+        })
     except Exception as e:
         logger.error(f"File delete error: {e}")
         return jsonify({"success": False, "error": str(e)}), 500

@@ -1788,7 +1788,19 @@ async function triggerForceSync() {
     const res = await apiFetch("/api/admin/force-sync", { method: "POST" });
     const data = await res.json();
     if (data.success) {
-      showToast("Knowledge base re-indexed successfully!");
+      const d = data.details || {};
+      const missing = d.sources_missing || [];
+      if (missing.length) {
+        // A sync that finds no spreadsheet returns zero rows without touching
+        // existing data, so it looks like a success. Say which source was
+        // missing rather than letting it pass as "re-indexed successfully".
+        showToast(`Re-indexed, but no source file found for: ${missing.join(", ")}. Re-upload that spreadsheet.`);
+      } else {
+        showToast(
+          `Re-indexed: ${d.users_count ?? 0} users, ${d.hlb_allocations_count ?? 0} allocations, ` +
+          `${d.hlb_descriptions_count ?? 0} descriptions, ${d.pdf_chunks_count ?? 0} manual chunks.`
+        );
+      }
       loadAdminStats();
       loadUploadedFiles();
     } else {

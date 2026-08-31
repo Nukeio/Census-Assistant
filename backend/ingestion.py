@@ -7,7 +7,7 @@ import os
 import re
 import logging
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import openpyxl
 import pypdf
 from .database import get_db_connection, init_database
@@ -30,6 +30,50 @@ def excel_data_type(filename: str) -> str:
     if "user" in lower:
         return "users"
     return "hlb_allocation"
+
+
+def find_latest_source(data_type: str) -> Optional[str]:
+    """
+    Locate the newest spreadsheet in ROOT_DIR that backs *data_type*.
+
+    Source spreadsheets do not keep a stable filename in practice. Each time
+    the circle office re-downloads one, the browser appends a counter --
+    "All_Users (3).xlsx" -- and secure_filename() rewrites that to
+    "All_Users_3.xlsx" on upload. The previous code looked for the exact
+    original names, so after the first re-upload a Force Sync silently found
+    nothing and reported zero rows for every spreadsheet.
+
+    Files are matched on excel_data_type(), the same classifier the upload and
+    delete paths already use, so all three agree on which table a file backs.
+    When several candidates exist (old copies left behind by successive
+    uploads), the most recently modified one wins.
+    """
+    candidates = []
+    for fname in os.listdir(ROOT_DIR):
+        if os.path.splitext(fname)[1].lower() not in (".xlsx", ".xls"):
+            continue
+        if fname.startswith("~$"):          # Excel lock files
+            continue
+        if excel_data_type(fname) != data_type:
+            continue
+        full = os.path.join(ROOT_DIR, fname)
+        try:
+            candidates.append((os.path.getmtime(full), full))
+        except OSError:
+            continue
+
+    if not candidates:
+        return None
+
+    candidates.sort(reverse=True)
+    chosen = candidates[0][1]
+    if len(candidates) > 1:
+        others = ", ".join(os.path.basename(p) for _, p in candidates[1:])
+        logger.info(
+            f"{data_type}: {len(candidates)} candidate files present; using the newest "
+            f"({os.path.basename(chosen)}). Older copies ignored: {others}"
+        )
+    return chosen
 
 
 def remove_source_file_data(filename: str) -> dict:
@@ -87,7 +131,8 @@ def remove_source_file_data(filename: str) -> dict:
 def ingest_all_users(filepath: str = None) -> int:
     """Ingest All_Users.xlsx into functionaries table."""
     if not filepath:
-        filepath = os.path.join(ROOT_DIR, "All_Users.xlsx")
+        # Resolved by content type, not by exact filename -- see find_latest_source.
+        filepath = find_latest_source("users") or os.path.join(ROOT_DIR, "All_Users.xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -147,7 +192,7 @@ def ingest_all_users(filepath: str = None) -> int:
 def ingest_hlb_allocation(filepath: str = None) -> int:
     """Ingest HLB Allocation (2).xlsx into hlb_allocations table."""
     if not filepath:
-        filepath = os.path.join(ROOT_DIR, "HLB Allocation (2).xlsx")
+        filepath = find_latest_source("hlb_allocation") or os.path.join(ROOT_DIR, "HLB Allocation (2).xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -206,7 +251,7 @@ def ingest_hlb_description(filepath: str = None) -> int:
     Landmark, HLB Description) into hlb_descriptions.
     """
     if not filepath:
-        filepath = os.path.join(ROOT_DIR, "HLB Description.xlsx")
+        filepath = find_latest_source("hlb_description") or os.path.join(ROOT_DIR, "HLB Description.xlsx")
     if not os.path.exists(filepath):
         logger.warning(f"File not found: {filepath}")
         return 0
@@ -547,19 +592,46 @@ def ingest_pdf_manuals(filepath: str = None) -> int:
 
 
 def run_full_ingestion():
-    """Run initial ingestion of all Excel and PDF sources."""
+    """
+    Re-ingest every Excel and PDF source currently present.
+
+    The resolved source filenames are reported back alongside the row counts.
+    A spreadsheet that cannot be found is the one failure mode that is
+    otherwise invisible -- it returns zero rows without touching the existing
+    data, so the app carries on looking healthy while a sync quietly did
+    nothing. Naming the file that was actually used makes that obvious.
+    """
     init_database()
+
+    sources = {
+        "users": find_latest_source("users"),
+        "hlb_allocations": find_latest_source("hlb_allocation"),
+        "hlb_descriptions": find_latest_source("hlb_description"),
+    }
+
     u_count = ingest_all_users()
     h_count = ingest_hlb_allocation()
     d_count = ingest_hlb_description()
     p_count = ingest_pdf_manuals()
-    logger.info(f"Full Ingestion complete: {u_count} users, {h_count} HLB allocations, {d_count} HLB descriptions, {p_count} PDF chunks.")
+
+    resolved = {k: (os.path.basename(v) if v else None) for k, v in sources.items()}
+    missing = [k for k, v in sources.items() if not v]
+
+    logger.info(
+        f"Full Ingestion complete: {u_count} users, {h_count} HLB allocations, "
+        f"{d_count} HLB descriptions, {p_count} PDF chunks. Sources: {resolved}"
+    )
+    if missing:
+        logger.warning(f"No source spreadsheet found for: {', '.join(missing)}")
+
     return {
         "users_count": u_count,
         "hlb_allocations_count": h_count,
         "hlb_descriptions_count": d_count,
         "pdf_chunks_count": p_count,
-        "status": "Completed"
+        "sources_used": resolved,
+        "sources_missing": missing,
+        "status": "Completed" if not missing else "Completed with missing sources"
     }
 
 if __name__ == "__main__":

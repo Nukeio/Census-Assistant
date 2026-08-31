@@ -109,6 +109,52 @@ See [`android/BUILD.md`](android/BUILD.md) for the full native build guide. The 
 - **Docker**: build and run the provided `Dockerfile` on any container host.
 - **Traditional WSGI hosting** (e.g. PythonAnywhere): pull the repo, install `requirements.txt`, and point your WSGI config at `server:app`.
 
+## Searching by area / village
+
+Village and ward names live in `hlb_descriptions`, not on the functionary or
+the allocation, so an area search drives off that table and joins outwards to
+find who is working there.
+
+- **Search Records → Area / Village** matches `village_ward_name`, `landmark`
+  and `boundary_description`. The boundary text matters in practice: field
+  staff often know a block by a landmark that appears only there ("east of the
+  LP School"), never as its village name.
+- **The All filter** picks area up too, so typing a village name finds it
+  without knowing to change the filter first.
+- **Supervisor tab** resolves an area through the blocks allocated under each
+  supervisor, answering "who supervises that place?". A supervisor has no
+  village column of their own — this is the same indirection the circle-number
+  lookup already used.
+
+## Manuals that are scans
+
+`HLO_Manual_English.pdf` has **no text layer**. Every page yields only the
+print shop's job ticket — `Tender Work F Instruction Manual ENGLISH
+AU-136PAGE DGT.job  Sig13 SideA` — because the pages are images of printed
+paper. Nothing in it could ever be indexed, searched or quoted.
+
+Two things follow:
+
+1. **Scanned PDFs no longer pollute the index.** `_is_pdf_boilerplate` skips
+   prepress furniture, so a scan produces zero chunks instead of one
+   meaningless chunk per page that the assistant could retrieve and cite. The
+   upload response says plainly that the file has no text layer.
+2. **Upload the manual as text instead.** OCR the PDF, then use
+   **Admin → Upload Manual as Text** (`POST /api/admin/upload-text`, accepts
+   `.txt` / `.md`). Page markers of the form
+
+   ```
+   ===== PAGE 42 =====
+   ```
+
+   are honoured, so citations still read *"Page 42"* and point at the printed
+   page a field user can turn to. Without markers the file is split into
+   sequential numbered blocks.
+
+Text manuals are stored in `manual_chunks` exactly like PDF manuals — same
+FTS index, same relevance gate, same citation rules — and are independently
+re-uploadable and deletable by filename.
+
 ## AI Assistant
 
 The assistant answers from **Gemini's own knowledge first**. The ingested

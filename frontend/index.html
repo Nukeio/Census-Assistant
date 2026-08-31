@@ -646,7 +646,7 @@
               <div class="flex-1 relative">
                 <span class="material-symbols-outlined absolute left-3.5 top-1/2 -translate-y-1/2 text-on-surface-variant">search</span>
                 <input id="records-search-input" oninput="debounceRecordsSearch()" type="text"
-                  placeholder="Search by Name, ID, Mobile, or HLB Number..."
+                  placeholder="Search by Name, ID, Mobile, HLB Number, or Village / Area..."
                   class="w-full pl-11 pr-4 py-2.5 rounded-lg border border-outline-variant bg-surface-container-lowest text-sm text-on-surface focus:border-primary focus:ring-1 focus:ring-primary outline-none transition-all" />
               </div>
               <!-- Quick Filter Pills -->
@@ -656,6 +656,7 @@
                 <button onclick="setSearchFilter('mobile')" id="filter-mobile" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">Mobile</button>
                 <button onclick="setSearchFilter('id')" id="filter-id" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">User ID</button>
                 <button onclick="setSearchFilter('hlb')" id="filter-hlb" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">HLB</button>
+                <button onclick="setSearchFilter('area')" id="filter-area" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">Area / Village</button>
                 <button onclick="setSearchFilter('supervisor')" id="filter-supervisor" class="px-3 py-1.5 rounded-lg text-xs font-semibold border border-outline-variant bg-surface-container-lowest text-on-surface-variant hover:bg-surface-variant/40 transition-colors">Supervisor</button>
               </div>
             </div>
@@ -763,7 +764,7 @@
           <div class="relative w-full">
             <span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-on-surface-variant">search</span>
             <input id="supervisor-search-input" oninput="debounceSupervisorSearch()" type="text"
-              placeholder="Search supervisors by name, ID, mobile, or circle number..."
+              placeholder="Search supervisors by name, ID, mobile, circle number, or village / area..."
               class="w-full bg-surface-container-lowest border border-outline-variant rounded-full py-3.5 pl-12 pr-4 text-sm text-on-surface focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary shadow-sm transition-all" />
           </div>
 
@@ -1194,6 +1195,39 @@
                 </div>
                 <div class="w-full h-2 rounded-full bg-surface-variant/50 overflow-hidden">
                   <div id="pdf-upload-progress-bar" class="h-full bg-primary rounded-full transition-[width] duration-150" style="width:0%"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Text Manual Dropzone -->
+            <div class="lg:col-span-3 bg-surface-container-lowest border border-outline-variant/30 rounded-2xl p-5 shadow-sm flex flex-col gap-3">
+              <div>
+                <h3 class="text-base font-bold text-on-surface">Upload Manual as Text</h3>
+                <p class="text-xs text-on-surface-variant">
+                  For guidance whose PDF is a <strong>scan</strong> of printed pages. A scanned PDF has no text
+                  layer, so nothing can be indexed from it and the assistant cannot quote it. Run the PDF through
+                  OCR and upload the resulting <code class="font-mono">.txt</code> here instead.
+                  Lines like <code class="font-mono">===== PAGE 42 =====</code> are recognised, so citations keep
+                  the printed page number.
+                </p>
+              </div>
+
+              <div id="text-upload-dropzone" onclick="document.getElementById('text-file-input').click()"
+                class="border-2 border-dashed border-outline-variant hover:border-primary rounded-xl p-6 flex flex-col items-center justify-center bg-surface hover:bg-surface-container-low transition-all cursor-pointer">
+                <input type="file" id="text-file-input" accept=".txt,.md,.text" class="hidden" onchange="handleTextManualUpload(this)" />
+                <div class="w-12 h-12 bg-primary-fixed rounded-full flex items-center justify-center text-primary mb-2">
+                  <span class="material-symbols-outlined text-2xl">description</span>
+                </div>
+                <p class="text-sm font-semibold text-on-surface">Click to upload a text manual</p>
+                <p class="text-xs text-on-surface-variant mt-0.5">Accepts .txt, .md — indexed and citable immediately</p>
+              </div>
+              <div id="text-upload-progress-wrap" class="hidden flex flex-col gap-1.5">
+                <div class="flex items-center justify-between text-xs">
+                  <span id="text-upload-progress-label" class="text-on-surface-variant truncate">Uploading...</span>
+                  <span id="text-upload-progress-pct" class="text-primary font-semibold shrink-0 ml-2">0%</span>
+                </div>
+                <div class="w-full h-2 rounded-full bg-surface-variant/50 overflow-hidden">
+                  <div id="text-upload-progress-bar" class="h-full bg-primary rounded-full transition-[width] duration-150" style="width:0%"></div>
                 </div>
               </div>
             </div>

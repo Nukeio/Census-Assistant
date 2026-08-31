@@ -978,7 +978,7 @@ function setSearchFilter(filterName) {
   state.recordsFilter = filterName;
   state.recordsPage = 1;
 
-  ["all", "name", "mobile", "id", "hlb", "supervisor"].forEach(f => {
+  ["all", "name", "mobile", "id", "hlb", "area", "supervisor"].forEach(f => {
     const btn = document.getElementById(`filter-${f}`);
     if (btn) {
       if (f === filterName) {
@@ -1895,6 +1895,12 @@ async function handlePdfUpload(input) {
     if (data.success) {
       setUploadProgressUi("pdf", { visible: true, pct: 100, label: "Chunking & indexing..." });
       showToast(data.message);
+      // A scanned PDF uploads fine but indexes nothing, and a toast scrolls
+      // away before it can be read. Surface that case as a persistent notice
+      // so it is not mistaken for a successful ingest.
+      if (data.warning === "no_text_layer") {
+        showScannedPdfNotice(data.message);
+      }
       loadAdminStats();
       loadUploadedFiles();
     } else {
@@ -1904,6 +1910,52 @@ async function handlePdfUpload(input) {
     showToast("PDF upload failed.");
   } finally {
     setTimeout(() => setUploadProgressUi("pdf", { visible: false }), 600);
+  }
+  input.value = "";
+}
+
+/**
+ * Persistent warning shown when an uploaded PDF turns out to be a scan.
+ * Rendered above the text-manual dropzone, which is the way out.
+ */
+function showScannedPdfNotice(message) {
+  const anchor = document.getElementById("text-upload-dropzone");
+  if (!anchor) return;
+  let box = document.getElementById("scanned-pdf-notice");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "scanned-pdf-notice";
+    anchor.parentNode.insertBefore(box, anchor);
+  }
+  box.className = "rounded-xl border border-[#8a6100]/40 bg-[#8a6100]/5 p-3 flex items-start gap-2";
+  box.innerHTML = `
+    <span class="material-symbols-outlined text-[#8a6100] text-lg mt-0.5">scanner</span>
+    <p class="text-xs text-on-surface leading-relaxed">${escapeHtml(message)}</p>`;
+}
+
+async function handleTextManualUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  setUploadProgressUi("text", { visible: true, pct: 0, label: `Uploading ${file.name}...` });
+  try {
+    const data = await uploadFileWithProgress("/api/admin/upload-text", file, (pct) => {
+      setUploadProgressUi("text", { visible: true, pct, label: `Uploading ${file.name}...` });
+    });
+    if (data.success) {
+      setUploadProgressUi("text", { visible: true, pct: 100, label: "Chunking & indexing..." });
+      showToast(data.message);
+      const notice = document.getElementById("scanned-pdf-notice");
+      if (notice) notice.remove();
+      loadAdminStats();
+      loadUploadedFiles();
+    } else {
+      showToast(data.error || "Upload failed.");
+    }
+  } catch (err) {
+    showToast("Text manual upload failed.");
+  } finally {
+    setTimeout(() => setUploadProgressUi("text", { visible: false }), 600);
   }
   input.value = "";
 }

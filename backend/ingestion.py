@@ -7,6 +7,7 @@ import os
 import re
 import logging
 from datetime import datetime
+from typing import List, Tuple
 import openpyxl
 import pypdf
 from .database import get_db_connection, init_database
@@ -279,6 +280,8 @@ def _ingest_single_pdf(cursor, filepath: str) -> int:
 
     logger.info(f"Parsing PDF: {filename}...")
     chunk_count = 0
+    pages_with_text = 0
+    boilerplate_pages = 0
     try:
         reader = pypdf.PdfReader(filepath)
         num_pages = len(reader.pages)
@@ -291,6 +294,19 @@ def _ingest_single_pdf(cursor, filepath: str) -> int:
 
             if not text.strip():
                 continue
+
+            # A scanned manual has no text layer, but it is rarely completely
+            # empty: prepress software leaves a job ticket on every page
+            # ("... Instruction Manual ENGLISH AU-136PAGE DGT.job  Sig13
+            # SideA"). Indexing those produced one meaningless chunk per page
+            # that could match a search and be cited as if it were guidance.
+            # Anything this short, or that looks like press furniture, is not
+            # manual content.
+            if _is_pdf_boilerplate(text):
+                boilerplate_pages += 1
+                continue
+
+            pages_with_text += 1
 
             paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
             if not paragraphs:
@@ -341,10 +357,152 @@ def _ingest_single_pdf(cursor, filepath: str) -> int:
                     pass
                 chunk_count += 1
 
-        logger.info(f"Parsed {chunk_count} chunks from {filename}")
+        if chunk_count == 0 and boilerplate_pages:
+            logger.warning(
+                f"{filename}: no readable text found across {num_pages} page(s) — "
+                f"{boilerplate_pages} page(s) contained only printer boilerplate. "
+                "This PDF is almost certainly a scan of printed pages, so it has no text "
+                "layer to index. Run it through OCR and upload the resulting .txt instead."
+            )
+        else:
+            logger.info(
+                f"Parsed {chunk_count} chunks from {filename} "
+                f"({pages_with_text}/{num_pages} pages had usable text)"
+            )
     except Exception as e:
         logger.error(f"Error reading PDF {filename}: {e}")
 
+    return chunk_count
+
+
+# Printer/prepress furniture that appears on every page of a scanned document.
+_BOILERPLATE_HINTS = ("sideA", "sidea", "sideb", ".job", "signature", "sig")
+
+
+def _is_pdf_boilerplate(text: str) -> bool:
+    """
+    True when a page's extracted text is press furniture rather than content.
+
+    Scanned PDFs typically yield the same one-line prepress job ticket on
+    every page. Left unchecked, each of those became an indexed "manual"
+    chunk that the assistant could retrieve and cite.
+    """
+    stripped = " ".join(text.split())
+    if len(stripped) < 120:
+        lowered = stripped.lower()
+        if any(h in lowered for h in _BOILERPLATE_HINTS):
+            return True
+        # Too little text to be a page of a manual either way.
+        if len(stripped) < 80:
+            return True
+    return False
+
+
+def ingest_text_manual(filepath: str) -> int:
+    """
+    Ingest a plain-text or Markdown manual into manual_chunks.
+
+    This is the route for a manual whose PDF is a scan: OCR it, then upload
+    the resulting .txt. The assistant then has real, searchable guidance text
+    instead of nothing.
+
+    Page numbers are preserved when the file carries markers of the form
+
+        ===== PAGE 42 =====
+
+    (which is what the OCR output uses) so citations can still say
+    "Page 42". Without markers the file is split into sequential blocks and
+    numbered from 1, so a citation still points somewhere useful.
+    """
+    from .database import get_db_connection
+
+    filename = os.path.basename(filepath)
+    doc_title = KNOWN_PDF_TITLES.get(filename) or (
+        os.path.splitext(filename)[0].replace("_", " ").replace("-", " ").strip() or filename
+    )
+
+    if not os.path.exists(filepath):
+        logger.warning(f"Text manual not found: {filepath}")
+        return 0
+
+    with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
+        raw = fh.read()
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Replace only this file's rows, exactly like the PDF path, so manuals
+    # stay independently re-uploadable and deletable.
+    cursor.execute("DELETE FROM manual_chunks WHERE source_file = ?", (filename,))
+    try:
+        cursor.execute("DELETE FROM manual_chunks_fts WHERE source_file = ?", (filename,))
+    except Exception:
+        pass
+
+    # Split on page markers if present; otherwise treat the whole file as one
+    # stream that gets sliced into numbered blocks below.
+    parts = re.split(r'^\s*=+\s*PAGE\s+(\d+)\s*=+\s*$', raw, flags=re.MULTILINE)
+    pages: List[Tuple[int, str]] = []
+    if len(parts) > 1:
+        # re.split with one capture group yields [pre, num, body, num, body...]
+        for i in range(1, len(parts) - 1, 2):
+            pages.append((int(parts[i]), parts[i + 1]))
+    else:
+        blocks = [b for b in re.split(r'\n\s*\n\s*\n+', raw) if b.strip()]
+        pages = list(enumerate(blocks, start=1)) if blocks else [(1, raw)]
+
+    chunk_count = 0
+    for page_num, body in pages:
+        body = body.strip()
+        if not body:
+            continue
+
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', body) if p.strip()] or [body]
+        current_chunk = ""
+        current_header = ""
+
+        def _flush(chunk: str, header: str) -> int:
+            if not chunk.strip():
+                return 0
+            cursor.execute("""
+                INSERT INTO manual_chunks (source_file, doc_title, page_number, section_header, chunk_text)
+                VALUES (?, ?, ?, ?, ?)
+            """, (filename, doc_title, page_num, header, chunk.strip()))
+            row_id = cursor.lastrowid
+            try:
+                cursor.execute("""
+                    INSERT INTO manual_chunks_fts (rowid, source_file, doc_title, page_number, section_header, chunk_text)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (row_id, filename, doc_title, str(page_num), header, chunk.strip()))
+            except Exception:
+                pass
+            return 1
+
+        for p in paragraphs:
+            header_match = re.match(
+                r'^(Q\.\s*\d+|Question\s*\d+|Chapter\s*\d+|\d+\.\d+|#{1,4}\s*\S.*|\b[A-Z][A-Z\s/&-]{5,}\b)', p
+            )
+            if header_match and not current_chunk:
+                current_header = header_match.group(0).lstrip("#").strip()
+
+            if len(current_chunk) + len(p) < 800 and not (current_chunk and header_match):
+                current_chunk += ("\n\n" + p) if current_chunk else p
+            else:
+                chunk_count += _flush(current_chunk, current_header)
+                current_chunk = p
+                if header_match:
+                    current_header = header_match.group(0).lstrip("#").strip()
+
+        chunk_count += _flush(current_chunk, current_header)
+
+    cursor.execute("""
+        INSERT INTO system_settings(key, value) VALUES('manual_fts_last_chunk_count', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP
+    """, (str(cursor.execute("SELECT COUNT(*) FROM manual_chunks").fetchone()[0]),))
+
+    conn.commit()
+    conn.close()
+    logger.info(f"Ingested {chunk_count} chunks from text manual {filename} ({len(pages)} page block(s)).")
     return chunk_count
 
 

@@ -157,6 +157,12 @@ def search_by_area(query: str, limit: int = 5) -> List[Dict[str, Any]]:
                 LIMIT 1
             """, (hlb_norm, hlb_norm.zfill(4))).fetchone()
 
+            # sqlite3.Row has no .get(); converting to a plain dict here is
+            # what stops the AttributeError that used to abort this function
+            # (and with it the whole chat request) the moment an area query
+            # actually matched an allocated block.
+            alloc_row = dict(alloc_row) if alloc_row else None
+
             if alloc_row and not any(r.get("hlb_no") == alloc_row["hlb_no"] for r in results):
                 maps_url = "https://www.google.com/maps/search/?api=1&query=" + url_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India") if area_name else None
                 results.append({

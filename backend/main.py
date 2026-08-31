@@ -18,7 +18,7 @@ from werkzeug.utils import secure_filename
 from .database import get_db_connection, init_database, DB_PATH
 from .ingestion import (
     run_full_ingestion, ingest_all_users, ingest_hlb_allocation, ingest_hlb_description, ingest_pdf_manuals,
-    excel_data_type, remove_source_file_data, KNOWN_PDF_TITLES
+    excel_data_type, remove_source_file_data, KNOWN_PDF_TITLES, ingest_text_manual
 )
 from .rag_engine import retrieve_rag_context, search_structured_records, search_manual_chunks
 from .llm_provider import answer_query, get_user_search_usage, get_ai_status, DAILY_WEB_SEARCH_LIMIT
@@ -43,6 +43,8 @@ FRONTEND_DIR = os.path.join(ROOT_DIR, "frontend")
 
 ALLOWED_EXCEL_EXTENSIONS = {".xlsx", ".xls"}
 ALLOWED_PDF_EXTENSIONS = {".pdf"}
+# Text manuals: the route for guidance whose PDF is a scan (see upload_text_manual).
+ALLOWED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}
 
 logger = logging.getLogger("CensusServer")
 logging.basicConfig(level=logging.INFO)
@@ -347,7 +349,72 @@ def records_search():
     show_disabled = _is_admin_request()
     disabled_clause = "" if show_disabled else "AND (f.status IS NULL OR UPPER(f.status) = 'ACTIVE')"
 
-    if filter_by == "hlb":
+    if filter_by == "area":
+        # Search by village / ward / landmark.
+        #
+        # The area names live in hlb_descriptions, not on the allocation or
+        # the functionary, so this drives off that table and joins outwards to
+        # find who is working there. boundary_description is included because
+        # field staff often know a block by a landmark named only in the
+        # boundary text ("east of the LP School") rather than by its village.
+        like = f"%{q}%"
+        area_where = """
+            (d.village_ward_name LIKE ? OR d.landmark LIKE ? OR d.boundary_description LIKE ?)
+        """
+        count_cursor = conn.cursor()
+        count_cursor.execute(f"""
+            SELECT COUNT(*)
+            FROM hlb_descriptions d
+            JOIN hlb_allocations h ON (h.hlb_no = d.hlb_no OR cast(h.hlb_no as integer) = cast(d.hlb_no as integer))
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            WHERE {area_where} {disabled_clause}
+        """, (like, like, like))
+        total = count_cursor.fetchone()[0]
+
+        cursor.execute(f"""
+            SELECT h.*, f.mobile_number, f.district, f.sub_district, f.status,
+                   d.village_ward_name, d.landmark, d.boundary_description
+            FROM hlb_descriptions d
+            JOIN hlb_allocations h ON (h.hlb_no = d.hlb_no OR cast(h.hlb_no as integer) = cast(d.hlb_no as integer))
+            LEFT JOIN functionaries f ON h.enumerator_user_id = f.user_id
+            WHERE {area_where} {disabled_clause}
+            ORDER BY d.village_ward_name ASC, h.hlb_no ASC
+            LIMIT ? OFFSET ?
+        """, (like, like, like, limit, offset))
+        area_rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+
+        results = []
+        for r in area_rows:
+            village = re.sub(r'\s*\(\d+\)\s*$', '', r.get("village_ward_name") or "").strip()
+            area_name = village or r.get("landmark") or None
+            maps_url = ("https://www.google.com/maps/search/?api=1&query=" +
+                        requests_quote(f"{area_name}, {CIRCLE_NAME}, Assam, India")) if area_name else None
+            results.append({
+                "id": r["id"],
+                "name": r["enumerator_name"],
+                "role": f"Enumerator (HLB {r['hlb_no']})",
+                "user_id": r["enumerator_user_id"],
+                "mobile": r.get("mobile_number") or "",
+                "hlb_number": r["hlb_no"],
+                "supervisor": r["supervisor_name"],
+                "circle": r["supervisory_circle_no"],
+                "allotment_date": r["allotment_date"],
+                "area_name": area_name,
+                "landmark": r.get("landmark") or "",
+                "boundary_description": r.get("boundary_description") or "",
+                "maps_url": maps_url
+            })
+        return jsonify({
+            "query": q,
+            "filter": filter_by,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "results": results
+        })
+
+    elif filter_by == "hlb":
         # Search HLB allocation directly with a COUNT for proper pagination
         count_cursor = conn.cursor()
         count_cursor.execute(f"""
@@ -467,15 +534,32 @@ def records_search():
             where_clauses.append("f.user_id LIKE ?")
             params.append(f"%{q}%")
         else:
-            where_clauses.append("(f.name LIKE ? OR f.user_id LIKE ? OR f.mobile_number LIKE ? OR f.functionary_type LIKE ? OR f.village_town LIKE ?)")
-            params.extend([f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%", f"%{q}%"])
+            # Area names are included here as well as in the dedicated "area"
+            # filter, so a field user typing a village name under "All" finds
+            # it without first knowing to change the filter. village_town is
+            # the functionary's own posting; village_ward_name and landmark
+            # come from the HLB description joined below.
+            where_clauses.append(
+                "(f.name LIKE ? OR f.user_id LIKE ? OR f.mobile_number LIKE ? OR f.functionary_type LIKE ? "
+                "OR f.village_town LIKE ? OR d.village_ward_name LIKE ? OR d.landmark LIKE ?)"
+            )
+            params.extend([f"%{q}%"] * 7)
 
     if not show_disabled:
         where_clauses.append("(f.status IS NULL OR UPPER(f.status) = 'ACTIVE')")
 
     where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
-    cursor.execute(f"SELECT COUNT(*) FROM functionaries f {where_sql}", params)
+    # The count mirrors the result query's joins because the WHERE clause can
+    # now reference the HLB description table (village / landmark). Without
+    # the same joins here the count query would fail on an area search.
+    cursor.execute(f"""
+        SELECT COUNT(*)
+        FROM functionaries f
+        LEFT JOIN hlb_allocations h ON f.user_id = h.enumerator_user_id
+        LEFT JOIN hlb_descriptions d ON (d.hlb_no = h.hlb_no OR d.hlb_no = cast(h.hlb_no as integer))
+        {where_sql}
+    """, params)
     total = cursor.fetchone()[0]
 
     # Rank by name relevance instead of insertion order: an exact name match
@@ -581,8 +665,23 @@ def supervisor_list():
             )"""
             params.extend([f"%{q}%", q])
         else:
-            where_sql += " AND (name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?)"
-            params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+            # Name / ID / mobile as before, plus area: a supervisor has no
+            # village column of their own, so an area match is resolved the
+            # same way the circle lookup above is — through the HLB blocks
+            # allocated under them. Typing a village or landmark therefore
+            # answers "who supervises that place?", which is how field staff
+            # actually think about it.
+            where_sql += """ AND (
+                name LIKE ? OR user_id LIKE ? OR mobile_number LIKE ?
+                OR name IN (
+                    SELECT DISTINCT h.supervisor_name
+                    FROM hlb_allocations h
+                    JOIN hlb_descriptions d
+                      ON (d.hlb_no = h.hlb_no OR cast(d.hlb_no as integer) = cast(h.hlb_no as integer))
+                    WHERE d.village_ward_name LIKE ? OR d.landmark LIKE ? OR d.boundary_description LIKE ?
+                )
+            )"""
+            params.extend([f"%{q}%"] * 6)
     if not show_disabled:
         where_sql += " AND (status IS NULL OR UPPER(status) = 'ACTIVE')"
 
@@ -982,9 +1081,68 @@ def upload_pdf():
     # Ingest just this one file — every other manual's existing chunks are
     # left untouched (see ingest_pdf_manuals docstring).
     cnt = ingest_pdf_manuals(target_path)
+    if cnt == 0:
+        # Almost always a scan: the pages are images, so there is no text
+        # layer to index. Say so plainly instead of reporting "0 chunks" and
+        # leaving the admin to wonder why the assistant cannot cite it.
+        return jsonify({
+            "success": True,
+            "warning": "no_text_layer",
+            "chunks": 0,
+            "message": (
+                f"{filename} uploaded, but no readable text could be extracted from it. "
+                "This PDF appears to be a scan of printed pages, so it has no text layer "
+                "to index and the assistant will not be able to quote it. Run it through "
+                "OCR and upload the resulting .txt file instead."
+            )
+        })
     return jsonify({
         "success": True,
+        "chunks": cnt,
         "message": f"PDF {filename} uploaded and processed ({cnt} chunks indexed)."
+    })
+
+@app.route("/api/admin/upload-text", methods=["POST"])
+def upload_text_manual():
+    """
+    Upload a plain-text or Markdown manual.
+
+    This is the route for guidance whose PDF is a scan — OCR it, upload the
+    .txt, and the assistant has real searchable text to answer and cite from.
+    Page markers of the form "===== PAGE 42 =====" are honoured so citations
+    keep pointing at the printed page number.
+    """
+    admin_error = _require_admin()
+    if admin_error:
+        return admin_error
+
+    if "file" not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "No selected file"}), 400
+
+    filename = secure_filename(file.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in ALLOWED_TEXT_EXTENSIONS:
+        return jsonify({
+            "error": f"Invalid file type '{ext}'. Only text files ({', '.join(sorted(ALLOWED_TEXT_EXTENSIONS))}) are allowed."
+        }), 400
+
+    target_path = os.path.join(ROOT_DIR, filename)
+    file.save(target_path)
+
+    cnt = ingest_text_manual(target_path)
+    if cnt == 0:
+        return jsonify({
+            "success": False,
+            "error": f"{filename} contained no usable text to index."
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "chunks": cnt,
+        "message": f"{filename} uploaded and indexed ({cnt} chunks). The assistant can now quote it."
     })
 
 @app.route("/api/admin/logs", methods=["GET"])

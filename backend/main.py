@@ -1291,23 +1291,59 @@ def admin_toggle_user_status(user_id):
 
 @app.route("/api/admin/uploaded-files", methods=["GET"])
 def admin_uploaded_files():
-    """List Excel and PDF data sources present in ROOT_DIR."""
+    """
+    List the data sources present in ROOT_DIR.
+
+    Text manuals (.txt/.md) are included alongside Excel and PDF — an uploaded
+    text manual was previously indexed correctly but never appeared here,
+    which made a successful upload look like it had failed.
+
+    Each manual also reports how many chunks it currently contributes to the
+    searchable index. That number is the quickest answer to "is this file
+    actually working?": a scanned PDF shows 0, a healthy manual shows many.
+    """
     admin_error = _require_admin()
     if admin_error:
         return admin_error
 
+    # How many indexed chunks each source file currently contributes.
+    chunk_counts = {}
+    try:
+        conn = get_db_connection()
+        chunk_counts = {
+            r["source_file"]: r["n"] for r in conn.execute(
+                "SELECT source_file, COUNT(*) AS n FROM manual_chunks GROUP BY source_file"
+            ).fetchall()
+        }
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not read manual chunk counts: {e}")
+
     files = []
-    target_exts = {".xlsx", ".xls", ".pdf"}
+    target_exts = {".xlsx", ".xls", ".pdf", ".txt", ".md", ".text"}
+    type_labels = {
+        ".pdf": "PDF Manual",
+        ".txt": "Text Manual", ".md": "Text Manual", ".text": "Text Manual",
+    }
     for fname in os.listdir(ROOT_DIR):
         ext = os.path.splitext(fname)[1].lower()
         if ext in target_exts:
+            # ".txt"/".md" are ordinary project-file extensions (README.md,
+            # requirements.txt), so a text file is only a data source once it
+            # has actually been ingested as a manual. Without this check the
+            # list offers a delete button next to the project's own files.
+            if ext in (".txt", ".md", ".text") and fname not in chunk_counts:
+                continue
             full_path = os.path.join(ROOT_DIR, fname)
             stat = os.stat(full_path)
             size_kb = round(stat.st_size / 1024, 1)
             size_str = f"{round(size_kb / 1024, 1)} MB" if size_kb >= 1024 else f"{size_kb} KB"
+            is_manual = ext in type_labels
             files.append({
                 "filename": fname,
-                "file_type": "PDF Manual" if ext == ".pdf" else "Excel Sheet",
+                "file_type": type_labels.get(ext, "Excel Sheet"),
+                "indexed_chunks": chunk_counts.get(fname, 0) if is_manual else None,
+                "is_manual": is_manual,
                 "size_str": size_str,
                 "size_bytes": stat.st_size,
                 "last_modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")

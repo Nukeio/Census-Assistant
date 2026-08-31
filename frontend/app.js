@@ -1976,9 +1976,22 @@ async function loadUploadedFiles() {
 
     data.files.forEach(f => {
       const isPdf = f.filename.endsWith(".pdf");
-      const icon = isPdf ? "picture_as_pdf" : "table_view";
+      const isText = /\.(txt|md|text)$/i.test(f.filename);
+      const icon = isPdf ? "picture_as_pdf" : isText ? "description" : "table_view";
       const iconColor = isPdf ? "text-error" : "text-primary";
-      
+
+      // For manuals, show how much of the searchable index they actually
+      // contribute. Zero means the assistant cannot quote the file at all —
+      // which is what a scanned PDF looks like — so it is called out rather
+      // than left for the admin to infer.
+      let indexNote = "";
+      if (f.is_manual) {
+        const n = f.indexed_chunks || 0;
+        indexNote = n > 0
+          ? `<span class="text-[#2e7d32] font-semibold">${n} chunks indexed</span>`
+          : `<span class="text-error font-semibold">not indexed — no readable text</span>`;
+      }
+
       const item = document.createElement("div");
       item.className = "flex items-center justify-between p-3 rounded-lg border border-outline-variant/30 bg-surface hover:bg-surface-container-low transition-colors";
       item.innerHTML = `
@@ -1986,7 +1999,7 @@ async function loadUploadedFiles() {
           <span class="material-symbols-outlined ${iconColor} text-2xl shrink-0">${icon}</span>
           <div class="truncate">
             <p class="text-xs font-bold text-on-surface truncate">${escapeHtml(f.filename)}</p>
-            <p class="text-[11px] text-on-surface-variant">${escapeHtml(f.file_type)} • ${escapeHtml(f.size_str)} • Modified ${escapeHtml(f.last_modified)}</p>
+            <p class="text-[11px] text-on-surface-variant">${escapeHtml(f.file_type)} • ${escapeHtml(f.size_str)} • Modified ${escapeHtml(f.last_modified)}${indexNote ? " • " : ""}${indexNote}</p>
           </div>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
